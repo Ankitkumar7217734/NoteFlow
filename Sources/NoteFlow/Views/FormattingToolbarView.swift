@@ -1,0 +1,528 @@
+import SwiftUI
+import AppKit
+
+struct FormattingToolbarView: View {
+    @State private var showLinkPopover = false
+    @State private var linkInitialText = ""
+    @State private var savedTextView: NSTextView?
+    @State private var savedRange = NSRange(location: 0, length: 0)
+    @State private var showTablePopover = false
+
+    var body: some View {
+        HStack(spacing: 2) {
+            // Bold
+            FormatButton(label: "B", weight: .bold, tooltip: "Bold (⌘B)") {
+                toggleFontTrait(.boldFontMask)
+            }
+            // Italic
+            FormatButton(label: "I", isItalic: true, tooltip: "Italic (⌘I)") {
+                toggleFontTrait(.italicFontMask)
+            }
+            // Underline
+            FormatButton(label: "U", underline: true, tooltip: "Underline (⌘U)") {
+                toggleUnderline()
+            }
+            // Code
+            FormatButton(label: "<>", mono: true, tooltip: "Inline Code") {
+                applyCodeStyle()
+            }
+
+            ToolbarDivider()
+
+            // Bullet list
+            FormatIconButton(icon: "list.bullet", tooltip: "Bullet List") {
+                insertListPrefix("• ")
+            }
+            // Ordered list
+            FormatIconButton(icon: "list.number", tooltip: "Numbered List") {
+                insertListPrefix("1. ")
+            }
+            // Checklist
+            FormatIconButton(icon: "checklist", tooltip: "Checklist") {
+                insertListPrefix("☐ ")
+            }
+
+            ToolbarDivider()
+
+            // Blockquote
+            FormatIconButton(icon: "text.quote", tooltip: "Quote") {
+                insertListPrefix("  ")
+            }
+            // Indent
+            FormatIconButton(icon: "increase.indent", tooltip: "Indent") {
+                runFormatAction(#selector(NSTextView.insertTab(_:)))
+            }
+
+            ToolbarDivider()
+
+            // Link
+            Button {
+                openLinkDialog()
+            } label: {
+                Image(systemName: "link")
+                    .font(.system(size: 14))
+                    .foregroundColor(.primary)
+                    .frame(width: 32, height: 30)
+            }
+            .buttonStyle(.plain)
+            .help("Add Link")
+            .popover(isPresented: $showLinkPopover, arrowEdge: .bottom) {
+                LinkPopover(
+                    initialText: linkInitialText,
+                    onApply: { text, url in
+                        applyLink(text: text, url: url)
+                        showLinkPopover = false
+                    },
+                    onCancel: { showLinkPopover = false }
+                )
+            }
+
+            // Table
+            Button {
+                // Capture the editor's text view + selection BEFORE the popover
+                // steals focus, so the table inserts at the right spot.
+                if let tv = activeTextView() {
+                    savedTextView = tv
+                    savedRange = tv.selectedRange()
+                }
+                showTablePopover = true
+            } label: {
+                Image(systemName: "tablecells")
+                    .font(.system(size: 14))
+                    .foregroundColor(.primary)
+                    .frame(width: 32, height: 30)
+            }
+            .buttonStyle(.plain)
+            .help("Insert Table")
+            .popover(isPresented: $showTablePopover, arrowEdge: .bottom) {
+                TablePicker { rows, cols in
+                    insertTable(rows: rows, cols: cols)
+                    showTablePopover = false
+                }
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(.ultraThinMaterial)
+    }
+
+    // MARK: – Lookup helpers
+
+    /// Walks the key window's view tree to find the editor's NSTextView.
+    /// The SwiftUI button steals first-responder when clicked, so we can't
+    /// rely on `keyWindow.firstResponder`.
+    private func activeTextView() -> NSTextView? {
+        if let tv = NSApp.keyWindow?.firstResponder as? NSTextView { return tv }
+        if let tv = findTextView(in: NSApp.keyWindow?.contentView) { return tv }
+        return findTextView(in: NSApp.mainWindow?.contentView)
+    }
+
+    private func findTextView(in view: NSView?) -> NSTextView? {
+        guard let view = view else { return nil }
+        if let tv = view as? NSTextView { return tv }
+        for sub in view.subviews {
+            if let tv = findTextView(in: sub) { return tv }
+        }
+        return nil
+    }
+
+    private func runFormatAction(_ selector: Selector) {
+        guard let tv = activeTextView() else { return }
+        tv.window?.makeFirstResponder(tv)
+        if tv.responds(to: selector) {
+            _ = tv.perform(selector, with: nil)
+        }
+    }
+
+    // MARK: – Bold / Italic via direct font trait manipulation
+
+    private func toggleFontTrait(_ trait: NSFontTraitMask) {
+        guard let tv = activeTextView(), let storage = tv.textStorage else { return }
+        tv.window?.makeFirstResponder(tv)
+        let range = tv.selectedRange()
+        let fm = NSFontManager.shared
+
+        if range.length == 0 {
+            // No selection — flip the typing attributes for the next characters typed
+            var typing = tv.typingAttributes
+            let current = (typing[.font] as? NSFont) ?? tv.font ?? EditorTypography.baseFont
+            let has = fm.traits(of: current).contains(trait)
+            typing[.font] = has
+                ? fm.convert(current, toNotHaveTrait: trait)
+                : fm.convert(current, toHaveTrait: trait)
+            tv.typingAttributes = typing
+            return
+        }
+
+        guard tv.shouldChangeText(in: range, replacementString: nil) else { return }
+
+        // Toggle: if every character has the trait, remove it; otherwise add it.
+        var allHave = true
+        storage.enumerateAttribute(.font, in: range, options: []) { value, _, stop in
+            let font = (value as? NSFont) ?? EditorTypography.baseFont
+            if !fm.traits(of: font).contains(trait) {
+                allHave = false
+                stop.pointee = true
+            }
+        }
+
+        storage.beginEditing()
+        storage.enumerateAttribute(.font, in: range, options: []) { value, subRange, _ in
+            let font = (value as? NSFont) ?? EditorTypography.baseFont
+            let newFont = allHave
+                ? fm.convert(font, toNotHaveTrait: trait)
+                : fm.convert(font, toHaveTrait: trait)
+            storage.addAttribute(.font, value: newFont, range: subRange)
+        }
+        storage.endEditing()
+        tv.didChangeText()
+    }
+
+    private func toggleUnderline() {
+        guard let tv = activeTextView(), let storage = tv.textStorage else { return }
+        tv.window?.makeFirstResponder(tv)
+        let range = tv.selectedRange()
+
+        if range.length == 0 {
+            var typing = tv.typingAttributes
+            let current = (typing[.underlineStyle] as? Int) ?? 0
+            typing[.underlineStyle] = current == 0 ? NSUnderlineStyle.single.rawValue : 0
+            tv.typingAttributes = typing
+            return
+        }
+
+        guard tv.shouldChangeText(in: range, replacementString: nil) else { return }
+
+        var allUnderlined = true
+        storage.enumerateAttribute(.underlineStyle, in: range, options: []) { value, _, stop in
+            let style = (value as? Int) ?? 0
+            if style == 0 {
+                allUnderlined = false
+                stop.pointee = true
+            }
+        }
+
+        storage.beginEditing()
+        if allUnderlined {
+            storage.removeAttribute(.underlineStyle, range: range)
+        } else {
+            storage.addAttribute(.underlineStyle,
+                                 value: NSUnderlineStyle.single.rawValue,
+                                 range: range)
+        }
+        storage.endEditing()
+        tv.didChangeText()
+    }
+
+    private func applyCodeStyle() {
+        guard let tv = activeTextView(), let storage = tv.textStorage else { return }
+        tv.window?.makeFirstResponder(tv)
+        let size = tv.font?.pointSize ?? EditorTypography.baseFontSize
+        let mono = NSFont.monospacedSystemFont(ofSize: size, weight: .regular)
+        let range = tv.selectedRange()
+        guard range.length > 0 else {
+            var typing = tv.typingAttributes
+            typing[.font] = mono
+            tv.typingAttributes = typing
+            return
+        }
+        guard tv.shouldChangeText(in: range, replacementString: nil) else { return }
+        storage.addAttribute(.font, value: mono, range: range)
+        tv.didChangeText()
+    }
+
+    private func insertListPrefix(_ prefix: String) {
+        guard let tv = activeTextView() else { return }
+        tv.window?.makeFirstResponder(tv)
+        let range = tv.selectedRange()
+        let str = tv.string as NSString
+        let lineStart = str.lineRange(for: NSRange(location: range.location, length: 0)).location
+        let insertRange = NSRange(location: lineStart, length: 0)
+        guard tv.shouldChangeText(in: insertRange, replacementString: prefix) else { return }
+        tv.insertText(prefix, replacementRange: insertRange)
+    }
+
+    // MARK: – Link
+
+    private func openLinkDialog() {
+        guard let tv = activeTextView() else { return }
+        let range = tv.selectedRange()
+        savedTextView = tv
+        savedRange = range
+        linkInitialText = range.length > 0
+            ? (tv.string as NSString).substring(with: range)
+            : ""
+        showLinkPopover = true
+    }
+
+    private func applyLink(text: String, url: String) {
+        guard let tv = savedTextView, let storage = tv.textStorage else { return }
+        let raw = url.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !raw.isEmpty else { return }
+        let normalizedURL = raw.contains("://") ? raw : "https://\(raw)"
+        let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let displayText = trimmedText.isEmpty ? raw : trimmedText
+
+        tv.window?.makeFirstResponder(tv)
+
+        let attr = NSAttributedString(string: displayText, attributes: [
+            .link: normalizedURL,
+            .font: tv.font ?? EditorTypography.baseFont
+        ])
+
+        guard tv.shouldChangeText(in: savedRange, replacementString: displayText) else { return }
+        storage.replaceCharacters(in: savedRange, with: attr)
+        tv.didChangeText()
+        tv.setSelectedRange(NSRange(location: savedRange.location + attr.length, length: 0))
+    }
+
+    // MARK: – Table
+
+    private func insertTable(rows: Int, cols: Int) {
+        // Prefer the text view that was active when the popover opened.
+        let tv = savedTextView ?? activeTextView()
+        guard let tv = tv, let storage = tv.textStorage else { return }
+        tv.window?.makeFirstResponder(tv)
+
+        let baseFont = tv.font ?? EditorTypography.baseFont
+        let borderColor = NSColor(white: 0.75, alpha: 1)
+        let headerBg = NSColor(white: 0.94, alpha: 1)
+
+        let table = NSTextTable()
+        table.numberOfColumns = cols
+        table.layoutAlgorithm = .automaticLayoutAlgorithm
+        table.collapsesBorders = true
+        table.hidesEmptyCells = false
+
+        let attr = NSMutableAttributedString()
+        let range = (savedTextView != nil) ? savedRange : tv.selectedRange()
+        let nsString = tv.string as NSString
+        let needsLeadingNewline = range.location > 0
+            && range.location <= nsString.length
+            && nsString.character(at: range.location - 1) != UInt16(0x0A)
+        if needsLeadingNewline {
+            attr.append(NSAttributedString(string: "\n", attributes: [
+                .font: baseFont,
+                .foregroundColor: NSColor.black
+            ]))
+        }
+
+        for r in 0..<rows {
+            for c in 0..<cols {
+                let block = NSTextTableBlock(
+                    table: table,
+                    startingRow: r, rowSpan: 1,
+                    startingColumn: c, columnSpan: 1
+                )
+                block.setBorderColor(borderColor)
+                block.setWidth(1, type: .absoluteValueType, for: .border)
+                block.setWidth(8, type: .absoluteValueType, for: .padding)
+                if r == 0 { block.backgroundColor = headerBg }
+
+                let para = NSMutableParagraphStyle()
+                para.textBlocks = [block]
+
+                let text = r == 0 ? "Header \(c + 1)" : " "
+                let weight: NSFont.Weight = r == 0 ? .semibold : .regular
+                let font = NSFont.systemFont(ofSize: baseFont.pointSize, weight: weight)
+
+                attr.append(NSAttributedString(string: "\(text)\n", attributes: [
+                    .paragraphStyle: para,
+                    .font: font,
+                    .foregroundColor: NSColor.black
+                ]))
+            }
+        }
+
+        attr.append(NSAttributedString(string: "\n", attributes: [
+            .font: baseFont,
+            .foregroundColor: NSColor.black,
+            .paragraphStyle: NSParagraphStyle.default
+        ]))
+
+        guard tv.shouldChangeText(in: range, replacementString: attr.string) else { return }
+        storage.replaceCharacters(in: range, with: attr)
+        tv.didChangeText()
+        savedTextView = nil
+    }
+}
+
+// MARK: – Link Popover
+
+struct LinkPopover: View {
+    @State private var text: String
+    @State private var url: String
+    let onApply: (String, String) -> Void
+    let onCancel: () -> Void
+
+    init(initialText: String,
+         initialURL: String = "",
+         onApply: @escaping (String, String) -> Void,
+         onCancel: @escaping () -> Void) {
+        _text = State(initialValue: initialText)
+        _url = State(initialValue: initialURL)
+        self.onApply = onApply
+        self.onCancel = onCancel
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("TEXT")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundColor(.secondary)
+                    .tracking(0.5)
+                TextField("Link text", text: $text)
+                    .textFieldStyle(.roundedBorder)
+                    .controlSize(.large)
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("URL")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundColor(.secondary)
+                    .tracking(0.5)
+                TextField("https://example.com", text: $url)
+                    .textFieldStyle(.roundedBorder)
+                    .controlSize(.large)
+            }
+
+            HStack(spacing: 8) {
+                Spacer()
+                Button("Cancel", action: onCancel)
+                    .keyboardShortcut(.cancelAction)
+                Button("Apply") { onApply(text, url) }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(url.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+        }
+        .padding(18)
+        .frame(width: 320)
+    }
+}
+
+// MARK: – Table Picker
+
+struct TablePicker: View {
+    static let maxCols = 5
+    static let maxRows = 10
+    static let cellSize: CGFloat = 24
+    static let cellSpacing: CGFloat = 4
+
+    @State private var hoverCol = 1
+    @State private var hoverRow = 1
+
+    let onSelect: (_ rows: Int, _ cols: Int) -> Void
+
+    private var gridWidth: CGFloat {
+        CGFloat(Self.maxCols) * Self.cellSize + CGFloat(Self.maxCols - 1) * Self.cellSpacing
+    }
+    private var gridHeight: CGFloat {
+        CGFloat(Self.maxRows) * Self.cellSize + CGFloat(Self.maxRows - 1) * Self.cellSpacing
+    }
+
+    var body: some View {
+        VStack(spacing: 10) {
+            gridBody
+                .frame(width: gridWidth, height: gridHeight)
+                .contentShape(Rectangle())
+                .onContinuousHover { phase in
+                    switch phase {
+                    case .active(let loc):
+                        let step = Self.cellSize + Self.cellSpacing
+                        let c = Int(loc.x / step) + 1
+                        let r = Int(loc.y / step) + 1
+                        hoverCol = min(Self.maxCols, max(1, c))
+                        hoverRow = min(Self.maxRows, max(1, r))
+                    case .ended:
+                        break
+                    }
+                }
+                .onTapGesture {
+                    onSelect(hoverRow, hoverCol)
+                }
+
+            Text("\(hoverCol) × \(hoverRow)")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundColor(.secondary)
+                .monospacedDigit()
+        }
+        .padding(18)
+    }
+
+    private var gridBody: some View {
+        VStack(spacing: Self.cellSpacing) {
+            ForEach(0..<Self.maxRows, id: \.self) { r in
+                HStack(spacing: Self.cellSpacing) {
+                    ForEach(0..<Self.maxCols, id: \.self) { c in
+                        let on = r < hoverRow && c < hoverCol
+                        RoundedRectangle(cornerRadius: 4)
+                            .fill(on ? Color.accentColor.opacity(0.22) : Color.clear)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 4)
+                                    .stroke(
+                                        on ? Color.accentColor : Color.primary.opacity(0.32),
+                                        lineWidth: 1
+                                    )
+                            )
+                            .frame(width: Self.cellSize, height: Self.cellSize)
+                    }
+                }
+            }
+        }
+    }
+}
+
+// MARK: – Sub-components
+
+struct FormatButton: View {
+    let label: String
+    var weight: Font.Weight = .regular
+    var isItalic: Bool = false
+    var underline = false
+    var mono = false
+    let tooltip: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Text(label)
+                .font(mono
+                      ? .system(size: 13, design: .monospaced)
+                      : .system(size: 14, weight: weight)
+                     )
+                .italic(isItalic)
+                .underline(underline)
+                .foregroundColor(.primary)
+                .frame(width: 32, height: 30)
+        }
+        .buttonStyle(.plain)
+        .help(tooltip)
+    }
+}
+
+struct FormatIconButton: View {
+    let icon: String
+    let tooltip: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: icon)
+                .font(.system(size: 14))
+                .foregroundColor(.primary)
+                .frame(width: 32, height: 30)
+        }
+        .buttonStyle(.plain)
+        .help(tooltip)
+    }
+}
+
+struct ToolbarDivider: View {
+    var body: some View {
+        Rectangle()
+            .fill(Color.primary.opacity(0.15))
+            .frame(width: 1, height: 20)
+            .padding(.horizontal, 4)
+    }
+}

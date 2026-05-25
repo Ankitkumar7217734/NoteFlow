@@ -1,0 +1,26 @@
+# Swift build artifacts
+.build/
+.swiftpm/
+Package.resolved
+
+# DMG packaging
+.dmg-build/
+*.dmg
+
+# macOS
+.DS_Store
+**/.DS_Store
+
+# Node (inactive Electron scaffold)
+node_modules/
+dist/
+
+# Editor / IDE
+.vscode/
+.idea/
+
+# Claude Code local state
+.claude/
+
+# Logs
+*.log

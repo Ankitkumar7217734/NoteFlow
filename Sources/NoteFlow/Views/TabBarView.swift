@@ -1,0 +1,202 @@
+import SwiftUI
+import AppKit
+
+private let iconColor      = Color(red: 0.20, green: 0.20, blue: 0.20)
+private let iconColorDim   = Color(red: 0.50, green: 0.50, blue: 0.50)
+
+// NoteFlow logo — uses AppLogo.processed (already cropped to the alpha
+// bounding box and clipped to a 22% rounded-corner squircle). The image
+// is pre-rendered once at full resolution, so SwiftUI just downsamples
+// it crisply with .interpolation(.high).
+struct NoteFlowLogo: View {
+    var size: CGFloat = 22
+
+    var body: some View {
+        Image(nsImage: AppLogo.processed)
+            .resizable()
+            .interpolation(.high)
+            .frame(width: size, height: size)
+    }
+}
+
+struct TabBarView: View {
+    @EnvironmentObject var store: NoteStore
+    /// In the main window we reserve ~70pt of leading space so the macOS
+    /// red/yellow/green buttons don't overlap the logo and tabs.
+    var needsTrafficLightSpace: Bool = false
+    /// True when this tab bar lives inside the floating panel. Used to hide
+    /// the expand-to-full button and to route the close (✕) button to
+    /// dismissing the panel instead of closing the main window.
+    var isFloatingPanel: Bool = false
+
+    var body: some View {
+        HStack(spacing: 0) {
+            // App logo
+            NoteFlowLogo(size: 22)
+                .padding(.leading, needsTrafficLightSpace ? 78 : 8)
+                .padding(.trailing, 6)
+
+            // Scrollable tabs
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 2) {
+                    ForEach(store.openTabs) { note in
+                        TabChip(note: note, isActive: note.id == store.activeTabId)
+                    }
+                }
+                .padding(.vertical, 6)
+            }
+
+            // New tab
+            Button { store.newNote() } label: {
+                Image(systemName: "plus")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundColor(iconColor)
+                    .frame(width: 28, height: 28)
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 4)
+
+            Spacer()
+
+            // Expand & close
+            HStack(spacing: 10) {
+                if !isFloatingPanel {
+                    Button {
+                        DispatchQueue.main.async {
+                            (NSApp.delegate as? AppDelegate)?.expandToFull()
+                        }
+                    } label: {
+                        Image(systemName: "arrow.up.left.and.arrow.down.right")
+                            .font(.system(size: 13))
+                            .foregroundColor(iconColor)
+                            .frame(width: 28, height: 28)
+                            .background(Color.white.opacity(0.001)) // makes the entire frame hit-testable
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                }
+
+                Button {
+                    let floating = isFloatingPanel
+                    // Defer so SwiftUI fully processes the click before
+                    // anything tears the hosting view down.
+                    DispatchQueue.main.async {
+                        if floating {
+                            closeFloatingPanel()
+                        } else {
+                            // Close the regular main window only — skip
+                            // NSPanels so we never target the floating one.
+                            NSApp.windows
+                                .first(where: { $0.isVisible && !($0 is NSPanel) })?
+                                .close()
+                        }
+                    }
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 13))
+                        .foregroundColor(iconColor)
+                        .frame(width: 28, height: 28)
+                        .background(Color.white.opacity(0.001))
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.trailing, 14)
+        }
+        .frame(height: 38)
+        .background(WindowDragView())
+    }
+
+    /// Close the floating panel reliably. Try the AppDelegate path first
+    /// (it also restores the previously-active app), then force-close any
+    /// NSPanel that's still on screen as a defensive backup. We've seen
+    /// SwiftUI button actions in non-activating panels intermittently fail
+    /// to reach AppDelegate, so the backup is essential.
+    private func closeFloatingPanel() {
+        (NSApp.delegate as? AppDelegate)?.toggleFloating()
+        // If the panel is still visible (toggleFloating didn't fire, or
+        // the flag was out of sync), bring it down manually.
+        for window in NSApp.windows where (window is NSPanel) && window.isVisible {
+            window.orderOut(nil)
+        }
+        if NoteStore.shared.isFloating {
+            NoteStore.shared.isFloating = false
+        }
+    }
+}
+
+// Tap inactive tab to switch; tap active tab title to rename it
+struct TabChip: View {
+    @EnvironmentObject var store: NoteStore
+    let note: Note
+    let isActive: Bool
+
+    @State private var isEditing = false
+    @State private var editTitle = ""
+    @FocusState private var fieldFocused: Bool
+
+    var body: some View {
+        HStack(spacing: 6) {
+            if isActive && isEditing {
+                TextField("", text: $editTitle)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 13))
+                    .foregroundColor(Color.black)
+                    .frame(minWidth: 60, maxWidth: 180)
+                    .focused($fieldFocused)
+                    .onSubmit { commitTitle() }
+                    .onExitCommand { cancelEdit() }
+                    .onChange(of: fieldFocused) { _, focused in
+                        if !focused { commitTitle() }
+                    }
+            } else {
+                Text(note.title)
+                    .font(.system(size: 13))
+                    .lineLimit(1)
+                    .foregroundColor(isActive ? Color.black : iconColorDim)
+            }
+
+            Button { store.closeTab(note.id) } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundColor(iconColorDim)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 11)
+        .padding(.vertical, 5)
+        .background(
+            RoundedRectangle(cornerRadius: 6)
+                .fill(isActive ? Color.white.opacity(0.8) : Color.clear)
+        )
+        .contentShape(Rectangle())
+        .onTapGesture {
+            if isActive {
+                editTitle = note.title
+                isEditing = true
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { fieldFocused = true }
+            } else {
+                store.activeTabId = note.id
+            }
+        }
+    }
+
+    private func commitTitle() {
+        let trimmed = editTitle.trimmingCharacters(in: .whitespaces)
+        store.updateNote(id: note.id, title: trimmed.isEmpty ? "Untitled" : trimmed)
+        isEditing = false
+    }
+
+    private func cancelEdit() {
+        isEditing = false
+    }
+}
+
+struct WindowDragView: NSViewRepresentable {
+    func makeNSView(context: Context) -> DraggableView { DraggableView() }
+    func updateNSView(_ nsView: DraggableView, context: Context) {}
+
+    class DraggableView: NSView {
+        override var mouseDownCanMoveWindow: Bool { true }
+    }
+}
