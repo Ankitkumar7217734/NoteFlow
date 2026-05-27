@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ContentView: View {
     @EnvironmentObject var store: NoteStore
+    @EnvironmentObject var theme: ThemeStore
     /// Per-window UI state (sidebar open, search text, formatting toolbar).
     /// Each ContentView instance gets its own, so toggling in the main
     /// window doesn't toggle in the floating panel.
@@ -23,7 +24,9 @@ struct ContentView: View {
             )
                 .environmentObject(store)
 
-            Divider().opacity(0.3)
+            Rectangle()
+                .fill(theme.palette.dividerColor)
+                .frame(height: 1)
 
             // ── Body ─────────────────────────────────────────────────
             HStack(spacing: 0) {
@@ -32,7 +35,9 @@ struct ContentView: View {
                 SidebarIconBar()
                     .environmentObject(store)
 
-                Divider().opacity(0.3)
+                Rectangle()
+                    .fill(theme.palette.dividerColor)
+                    .frame(width: 1)
 
                 // Main editor area
                 Group {
@@ -42,7 +47,7 @@ struct ContentView: View {
                             NoteEditorView(note: note)
                                 .id(note.id)
                                 .environmentObject(store)
-                                .background(Color.white)
+                                .background(theme.palette.editorBackground)
                                 .clipShape(RoundedRectangle(cornerRadius: 12))
                                 .padding(.top, 12)
                                 .padding(.trailing, 16)
@@ -66,7 +71,8 @@ struct ContentView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .background(Color(red: 0.941, green: 0.937, blue: 0.918))
+        .background(theme.palette.chromeBackground)
+        .preferredColorScheme(theme.palette.colorScheme)
         // Let the tab bar overlap the macOS title-bar area so the traffic
         // lights and the tabs/icons sit on the same row.
         .ignoresSafeArea(.all, edges: .top)

@@ -1,8 +1,5 @@
 import SwiftUI
 
-private let iconColor    = Color(red: 0.20, green: 0.20, blue: 0.20)
-private let iconColorDim = Color(red: 0.50, green: 0.50, blue: 0.50)
-
 // Unified sidebar. In the collapsed state it shows a column of icon
 // buttons. In the expanded state (store.sidebarOpen == true) it widens, the
 // icons gain text labels next to them, the search icon swaps for an inline
@@ -11,6 +8,7 @@ private let iconColorDim = Color(red: 0.50, green: 0.50, blue: 0.50)
 struct SidebarIconBar: View {
     @EnvironmentObject var store: NoteStore
     @EnvironmentObject var windowState: WindowState
+    @EnvironmentObject var theme: ThemeStore
     @Environment(\.openSettings) private var openSettings
     @FocusState private var searchFocused: Bool
 
@@ -92,23 +90,23 @@ struct SidebarIconBar: View {
         HStack(spacing: 8) {
             Image(systemName: "magnifyingglass")
                 .font(.system(size: 13))
-                .foregroundColor(iconColorDim)
+                .foregroundColor(theme.palette.iconColorDim)
             TextField("Search notes…", text: $windowState.searchText)
                 .textFieldStyle(.plain)
                 .font(.system(size: 13))
-                .foregroundColor(.black)
+                .foregroundColor(theme.palette.text)
                 .focused($searchFocused)
             if !windowState.searchText.isEmpty {
                 Button { windowState.searchText = "" } label: {
                     Image(systemName: "xmark.circle.fill")
-                        .foregroundColor(iconColorDim)
+                        .foregroundColor(theme.palette.iconColorDim)
                 }
                 .buttonStyle(.plain)
             }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
-        .background(Color.black.opacity(0.05), in: RoundedRectangle(cornerRadius: 8))
+        .background(theme.palette.searchFieldBackground, in: RoundedRectangle(cornerRadius: 8))
         .padding(.top, 4)
     }
 
@@ -160,15 +158,6 @@ struct SidebarIconBar: View {
             }
 
             SidebarRow(
-                icon: "sparkles",
-                label: "AI Assistant",
-                expanded: isExpanded,
-                tooltip: "AI Assistant"
-            ) {
-                // Future
-            }
-
-            SidebarRow(
                 text: "AA",
                 label: "Text Formatting",
                 expanded: isExpanded,
@@ -186,6 +175,7 @@ struct SidebarIconBar: View {
 // One row of the sidebar. Icon (or short text like "AA") sits in a 36×36
 // rounded slot; when the sidebar is expanded, a label appears next to it.
 struct SidebarRow: View {
+    @EnvironmentObject var theme: ThemeStore
     var icon: String? = nil
     var text: String? = nil
     let label: String
@@ -201,23 +191,23 @@ struct SidebarRow: View {
                     if let icon = icon {
                         Image(systemName: icon)
                             .font(.system(size: 15, weight: .regular))
-                            .foregroundColor(isActive ? .black : iconColorDim)
+                            .foregroundColor(isActive ? theme.palette.text : theme.palette.iconColorDim)
                     } else if let text = text {
                         Text(text)
                             .font(.system(size: 13, weight: isActive ? .bold : .regular))
-                            .foregroundColor(isActive ? .black : iconColorDim)
+                            .foregroundColor(isActive ? theme.palette.text : theme.palette.iconColorDim)
                     }
                 }
                 .frame(width: 36, height: 36)
                 .background(
-                    isActive ? Color.black.opacity(0.08) : Color.clear,
+                    isActive ? theme.palette.activeRowBackground : Color.clear,
                     in: RoundedRectangle(cornerRadius: 8)
                 )
 
                 if expanded {
                     Text(label)
                         .font(.system(size: 13))
-                        .foregroundColor(Color.black)
+                        .foregroundColor(theme.palette.text)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }

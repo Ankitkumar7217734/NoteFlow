@@ -2,8 +2,29 @@ import SwiftUI
 import Carbon
 
 struct SettingsView: View {
+    @EnvironmentObject var theme: ThemeStore
+
     var body: some View {
         Form {
+            Section("Appearance") {
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Dark Mode")
+                        Text("Switch the app to a black background theme.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Toggle("", isOn: Binding(
+                        get: { theme.isDark },
+                        set: { theme.isDark = $0 }
+                    ))
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                }
+                .padding(.vertical, 4)
+            }
+
             Section("Floating Panel") {
                 HStack {
                     VStack(alignment: .leading, spacing: 2) {
@@ -19,7 +40,7 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 420, height: 130)
+        .frame(width: 460, height: 240)
     }
 }
 

@@ -285,8 +285,9 @@ struct FormattingToolbarView: View {
         tv.window?.makeFirstResponder(tv)
 
         let baseFont = tv.font ?? EditorTypography.baseFont
-        let borderColor = NSColor(white: 0.75, alpha: 1)
-        let headerBg = NSColor(white: 0.94, alpha: 1)
+        let palette = ThemeStore.shared.palette
+        let borderColor = palette.tableBorderNS
+        let headerBg = palette.tableHeaderBgNS
 
         let table = NSTextTable()
         table.numberOfColumns = cols
@@ -301,10 +302,9 @@ struct FormattingToolbarView: View {
             && range.location <= nsString.length
             && nsString.character(at: range.location - 1) != UInt16(0x0A)
         if needsLeadingNewline {
-            attr.append(NSAttributedString(string: "\n", attributes: [
-                .font: baseFont,
-                .foregroundColor: NSColor.black
-            ]))
+            // No foreground color — let the text view's textColor drive it,
+            // so the table adapts when the theme changes.
+            attr.append(NSAttributedString(string: "\n", attributes: [.font: baseFont]))
         }
 
         for r in 0..<rows {
@@ -328,15 +328,13 @@ struct FormattingToolbarView: View {
 
                 attr.append(NSAttributedString(string: "\(text)\n", attributes: [
                     .paragraphStyle: para,
-                    .font: font,
-                    .foregroundColor: NSColor.black
+                    .font: font
                 ]))
             }
         }
 
         attr.append(NSAttributedString(string: "\n", attributes: [
             .font: baseFont,
-            .foregroundColor: NSColor.black,
             .paragraphStyle: NSParagraphStyle.default
         ]))
 

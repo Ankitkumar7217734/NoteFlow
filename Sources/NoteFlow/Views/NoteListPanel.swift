@@ -5,6 +5,7 @@ import SwiftUI
 // the query, a short context snippet around the match in place of the
 // "X min ago" timestamp.
 struct NoteRow: View {
+    @EnvironmentObject var theme: ThemeStore
     let note: Note
     let isActive: Bool
     let query: String
@@ -23,24 +24,24 @@ struct NoteRow: View {
                 size: 13,
                 baseWeight: isActive ? .semibold : .regular
             ))
-            .foregroundColor(Color.black)
+            .foregroundColor(theme.palette.text)
             .lineLimit(1)
 
             if let snippet = bodySnippet() {
                 Text(snippet)
                     .lineLimit(1)
-                    .foregroundColor(Color(red: 0.45, green: 0.45, blue: 0.45))
+                    .foregroundColor(theme.palette.secondaryText)
             } else {
                 Text(Self.dateFormatter.localizedString(for: note.updatedAt, relativeTo: Date()))
                     .font(.system(size: 11))
-                    .foregroundColor(Color(red: 0.45, green: 0.45, blue: 0.45))
+                    .foregroundColor(theme.palette.secondaryText)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
         .background(
-            isActive ? Color.black.opacity(0.08) : Color.clear,
+            isActive ? theme.palette.activeRowBackground : Color.clear,
             in: RoundedRectangle(cornerRadius: 8)
         )
     }
@@ -56,7 +57,7 @@ struct NoteRow: View {
         while cursor < source.endIndex,
               let range = source.range(of: query, options: .caseInsensitive, range: cursor..<source.endIndex) {
             if let attrRange = Range<AttributedString.Index>(range, in: attr) {
-                attr[attrRange].backgroundColor = Color.yellow.opacity(0.55)
+                attr[attrRange].backgroundColor = theme.palette.searchHighlight
                 attr[attrRange].font = .system(size: size, weight: .bold)
             }
             cursor = range.upperBound

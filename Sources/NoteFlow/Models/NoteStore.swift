@@ -32,7 +32,14 @@ class NoteStore: ObservableObject {
         if let note = notes.first(where: { $0.id == id }) {
             let attr = note.attributedContent
             if attr.length > 0 {
-                storage.setAttributedString(attr)
+                // Strip baked-in foreground color so the text view's
+                // theme-driven textColor drives the default. Otherwise notes
+                // saved in light mode (with NSColor.black baked into the RTF)
+                // would render black-on-dark in dark mode.
+                let mutable = NSMutableAttributedString(attributedString: attr)
+                mutable.removeAttribute(.foregroundColor,
+                                        range: NSRange(location: 0, length: mutable.length))
+                storage.setAttributedString(mutable)
             }
         }
         sharedStorages[id] = storage

@@ -24,8 +24,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.regular)
         setDockIcon()
 
+        let palette = ThemeStore.shared.palette
         let content = ContentView(inTitledWindow: true)
             .environmentObject(NoteStore.shared)
+            .environmentObject(ThemeStore.shared)
 
         window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1280, height: 800),
@@ -36,16 +38,30 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         window.titlebarAppearsTransparent = true
         window.titleVisibility = .hidden
         window.isMovableByWindowBackground = true
-        window.backgroundColor = NSColor(red: 0.941, green: 0.937, blue: 0.918, alpha: 1.0)
-        window.appearance = NSAppearance(named: .aqua)
+        window.backgroundColor = palette.chromeBackgroundNS
+        window.appearance = NSAppearance(named: palette.appearance)
         let hostingView = NSHostingView(rootView: content)
-        hostingView.appearance = NSAppearance(named: .aqua)
+        hostingView.appearance = NSAppearance(named: palette.appearance)
         window.contentView = hostingView
         window.center()
         window.makeKeyAndOrderFront(nil)
 
         setupFloatingPanel()
         registerGlobalHotkey()
+
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(applyTheme),
+            name: .themeChanged, object: nil
+        )
+    }
+
+    @objc private func applyTheme() {
+        let palette = ThemeStore.shared.palette
+        let appearance = NSAppearance(named: palette.appearance)
+        window.backgroundColor = palette.chromeBackgroundNS
+        window.appearance = appearance
+        window.contentView?.appearance = appearance
+        floatingPanel?.contentView?.appearance = appearance
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
@@ -75,7 +91,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         floatingPanel.backgroundColor = .clear
         floatingPanel.isOpaque = false
         floatingPanel.hasShadow = true
-        floatingPanel.appearance = NSAppearance(named: .aqua)
+        let palette = ThemeStore.shared.palette
+        floatingPanel.appearance = NSAppearance(named: palette.appearance)
         // screenSaver level keeps it above full-screen apps.
         floatingPanel.level = .screenSaver
         floatingPanel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
@@ -83,9 +100,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         floatingPanel.hidesOnDeactivate = false
         floatingPanel.worksWhenModal = true
 
-        let panelContent = ContentView(isFloatingPanel: true).environmentObject(NoteStore.shared)
+        let panelContent = ContentView(isFloatingPanel: true)
+            .environmentObject(NoteStore.shared)
+            .environmentObject(ThemeStore.shared)
         let panelHost = NSHostingView(rootView: panelContent)
-        panelHost.appearance = NSAppearance(named: .aqua)
+        panelHost.appearance = NSAppearance(named: palette.appearance)
         panelHost.wantsLayer = true
         panelHost.layer?.cornerRadius = 14
         panelHost.layer?.masksToBounds = true

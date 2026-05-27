@@ -1,9 +1,6 @@
 import SwiftUI
 import AppKit
 
-private let iconColor      = Color(red: 0.20, green: 0.20, blue: 0.20)
-private let iconColorDim   = Color(red: 0.50, green: 0.50, blue: 0.50)
-
 // NoteFlow logo — uses AppLogo.processed (already cropped to the alpha
 // bounding box and clipped to a 22% rounded-corner squircle). The image
 // is pre-rendered once at full resolution, so SwiftUI just downsamples
@@ -21,6 +18,7 @@ struct NoteFlowLogo: View {
 
 struct TabBarView: View {
     @EnvironmentObject var store: NoteStore
+    @EnvironmentObject var theme: ThemeStore
     /// In the main window we reserve ~70pt of leading space so the macOS
     /// red/yellow/green buttons don't overlap the logo and tabs.
     var needsTrafficLightSpace: Bool = false
@@ -50,7 +48,7 @@ struct TabBarView: View {
             Button { store.newNote() } label: {
                 Image(systemName: "plus")
                     .font(.system(size: 14, weight: .medium))
-                    .foregroundColor(iconColor)
+                    .foregroundColor(theme.palette.iconColor)
                     .frame(width: 28, height: 28)
             }
             .buttonStyle(.plain)
@@ -68,7 +66,7 @@ struct TabBarView: View {
                     } label: {
                         Image(systemName: "arrow.up.left.and.arrow.down.right")
                             .font(.system(size: 13))
-                            .foregroundColor(iconColor)
+                            .foregroundColor(theme.palette.iconColor)
                             .frame(width: 28, height: 28)
                             .background(Color.white.opacity(0.001)) // makes the entire frame hit-testable
                             .contentShape(Rectangle())
@@ -94,7 +92,7 @@ struct TabBarView: View {
                 } label: {
                     Image(systemName: "xmark")
                         .font(.system(size: 13))
-                        .foregroundColor(iconColor)
+                        .foregroundColor(theme.palette.iconColor)
                         .frame(width: 28, height: 28)
                         .background(Color.white.opacity(0.001))
                         .contentShape(Rectangle())
@@ -128,6 +126,7 @@ struct TabBarView: View {
 // Tap inactive tab to switch; tap active tab title to rename it
 struct TabChip: View {
     @EnvironmentObject var store: NoteStore
+    @EnvironmentObject var theme: ThemeStore
     let note: Note
     let isActive: Bool
 
@@ -141,7 +140,7 @@ struct TabChip: View {
                 TextField("", text: $editTitle)
                     .textFieldStyle(.plain)
                     .font(.system(size: 13))
-                    .foregroundColor(Color.black)
+                    .foregroundColor(theme.palette.text)
                     .frame(minWidth: 60, maxWidth: 180)
                     .focused($fieldFocused)
                     .onSubmit { commitTitle() }
@@ -153,13 +152,13 @@ struct TabChip: View {
                 Text(note.title)
                     .font(.system(size: 13))
                     .lineLimit(1)
-                    .foregroundColor(isActive ? Color.black : iconColorDim)
+                    .foregroundColor(isActive ? theme.palette.text : theme.palette.iconColorDim)
             }
 
             Button { store.closeTab(note.id) } label: {
                 Image(systemName: "xmark")
                     .font(.system(size: 9, weight: .bold))
-                    .foregroundColor(iconColorDim)
+                    .foregroundColor(theme.palette.iconColorDim)
             }
             .buttonStyle(.plain)
         }
@@ -167,7 +166,7 @@ struct TabChip: View {
         .padding(.vertical, 5)
         .background(
             RoundedRectangle(cornerRadius: 6)
-                .fill(isActive ? Color.white.opacity(0.8) : Color.clear)
+                .fill(isActive ? theme.palette.activeTabBackground : Color.clear)
         )
         .contentShape(Rectangle())
         .onTapGesture {

@@ -524,9 +524,10 @@ final class NoteTextView: NSTextView {
             result.removeAttribute(key, range: full)
         }
 
-        // Force a readable foreground color.
+        // Strip any pasted foreground color so the text view's theme-driven
+        // textColor controls the rendered color. Don't bake a static color
+        // in — otherwise pasted text stays e.g. black after a dark-mode flip.
         result.removeAttribute(.foregroundColor, range: full)
-        result.addAttribute(.foregroundColor, value: NSColor.black, range: full)
 
         // Rewrite fonts: preserve bold/italic/mono, normalize family + size.
         result.enumerateAttribute(.font, in: full) { value, range, _ in
@@ -584,29 +585,31 @@ struct RichTextEditor: NSViewRepresentable {
         textView.isAutomaticLinkDetectionEnabled = true
         textView.isAutomaticDataDetectionEnabled = true
         textView.textContainerInset = NSSize(width: 28, height: 28)
-        // IMPORTANT: don't set textView.font / textView.textColor here.
-        // Those apply to *all* characters already in the storage and wipe
-        // bold/italic/custom-font/color attributes from loaded notes.
-        // typingAttributes only affects newly-typed characters, so the
-        // saved formatting is preserved and new text picks up our defaults.
-        textView.typingAttributes = [
-            .font: EditorTypography.baseFont,
-            .foregroundColor: NSColor.black
-        ]
-        textView.insertionPointColor = .black
-        textView.backgroundColor = .white
-        textView.drawsBackground = true
+        // IMPORTANT: don't set textView.font here — it would wipe per-run
+        // fonts (bold/italic/mono) on the existing storage. textColor is OK
+        // because we strip explicit .foregroundColor at load (NoteStore) and
+        // at paste (sanitize), so runs without an explicit color pick up
+        // textView.textColor — which we drive from the active theme.
+        textView.typingAttributes = [.font: EditorTypography.baseFont]
         textView.isEditable = true
         textView.isSelectable = true
-        // Force light appearance so text is always dark on white
-        textView.appearance = NSAppearance(named: .aqua)
+        textView.drawsBackground = true
 
-        // Link styling
-        textView.linkTextAttributes = [
-            .foregroundColor: NSColor.systemBlue,
-            .underlineStyle: NSUnderlineStyle.single.rawValue,
-            .cursor: NSCursor.pointingHand
-        ]
+        let scrollView = NSScrollView()
+        scrollView.hasVerticalScroller = true
+        scrollView.hasHorizontalScroller = false
+        scrollView.autohidesScrollers = true
+        scrollView.borderType = .noBorder
+        scrollView.drawsBackground = true
+        scrollView.documentView = textView
+
+        // Apply current theme to the new text view + scroll view, then
+        // subscribe to theme changes so a Settings toggle live-updates both
+        // the main window's editor and the floating panel's editor.
+        Self.applyPalette(ThemeStore.shared.palette, to: textView, scrollView: scrollView)
+        context.coordinator.textView = textView
+        context.coordinator.scrollView = scrollView
+        context.coordinator.startObservingTheme()
 
         textView.minSize = NSSize(width: 0, height: 0)
         textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
@@ -614,23 +617,28 @@ struct RichTextEditor: NSViewRepresentable {
         textView.isHorizontallyResizable = false
         textView.autoresizingMask = [.width]
 
-        let scrollView = NSScrollView()
-        scrollView.hasVerticalScroller = true
-        scrollView.hasHorizontalScroller = false
-        scrollView.autohidesScrollers = true
-        scrollView.borderType = .noBorder
-        scrollView.backgroundColor = .white
-        scrollView.drawsBackground = true
-        scrollView.appearance = NSAppearance(named: .aqua)
-        scrollView.documentView = textView
-
-        context.coordinator.textView = textView
         return scrollView
     }
 
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
         // No-op. Content sync is automatic because every editor for this
         // note is bound to the same NSTextStorage in NoteStore.
+    }
+
+    // Push the palette's editor colors onto an NSTextView + its scroll view.
+    // Used at construction and on every themeChanged notification.
+    static func applyPalette(_ palette: Palette, to textView: NSTextView, scrollView: NSScrollView) {
+        textView.backgroundColor = palette.editorBackgroundNS
+        textView.textColor = palette.textNS
+        textView.insertionPointColor = palette.textNS
+        textView.appearance = NSAppearance(named: palette.appearance)
+        textView.linkTextAttributes = [
+            .foregroundColor: palette.linkNS,
+            .underlineStyle: NSUnderlineStyle.single.rawValue,
+            .cursor: NSCursor.pointingHand
+        ]
+        scrollView.backgroundColor = palette.editorBackgroundNS
+        scrollView.appearance = NSAppearance(named: palette.appearance)
     }
 
     // Detach the layout manager when SwiftUI dismantles the view, so the
@@ -650,9 +658,27 @@ struct RichTextEditor: NSViewRepresentable {
     class Coordinator: NSObject, NSTextViewDelegate {
         var onTextChange: (NSAttributedString, String) -> Void
         weak var textView: NSTextView?
+        weak var scrollView: NSScrollView?
+        private var themeObserver: NSObjectProtocol?
 
         init(onTextChange: @escaping (NSAttributedString, String) -> Void) {
             self.onTextChange = onTextChange
+        }
+
+        deinit {
+            if let token = themeObserver {
+                NotificationCenter.default.removeObserver(token)
+            }
+        }
+
+        func startObservingTheme() {
+            themeObserver = NotificationCenter.default.addObserver(
+                forName: .themeChanged, object: nil, queue: .main
+            ) { [weak self] _ in
+                guard let tv = self?.textView, let sv = self?.scrollView else { return }
+                RichTextEditor.applyPalette(ThemeStore.shared.palette, to: tv, scrollView: sv)
+                tv.needsDisplay = true
+            }
         }
 
         func textDidChange(_ notification: Notification) {
@@ -669,6 +695,7 @@ struct RichTextEditor: NSViewRepresentable {
 // Thin wrapper that exposes the editor and the Copy button.
 struct NoteEditorView: View {
     @EnvironmentObject var store: NoteStore
+    @EnvironmentObject var theme: ThemeStore
     let note: Note
 
     var body: some View {
@@ -694,10 +721,10 @@ struct NoteEditorView: View {
                     Text("Copy")
                         .font(.system(size: 14, weight: .medium))
                 }
-                .foregroundColor(.white)
+                .foregroundColor(theme.palette.copyButtonText)
                 .padding(.horizontal, 18)
                 .padding(.vertical, 10)
-                .background(Color.black, in: Capsule())
+                .background(theme.palette.copyButtonBackground, in: Capsule())
             }
             .buttonStyle(.plain)
             .padding(20)
