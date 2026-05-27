@@ -12,4 +12,11 @@ final class WindowState: ObservableObject {
     /// Flip to true to ask the sidebar's search TextField to take keyboard
     /// focus. The sidebar resets it back to false once focus is granted.
     @Published var searchFocusRequested = false
+    /// When true, the sidebar's notes list shows trashed notes (with
+    /// Restore / Delete Forever actions) instead of the active set. The
+    /// search field is hidden in this mode.
+    @Published var viewingTrash = false
+    /// Non-nil filters the sidebar's notes list to only notes carrying
+    /// this tag. Per-window so the floating panel can keep its own filter.
+    @Published var selectedTag: String? = nil
 }

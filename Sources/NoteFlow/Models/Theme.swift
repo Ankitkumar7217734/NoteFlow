@@ -32,6 +32,8 @@ struct Palette {
     let linkNS: NSColor
     let tableBorderNS: NSColor
     let tableHeaderBgNS: NSColor
+    let selectionBackgroundNS: NSColor
+    let selectedTextNS: NSColor
 
     let appearance: NSAppearance.Name
     let colorScheme: ColorScheme
@@ -56,6 +58,8 @@ struct Palette {
         linkNS: .systemBlue,
         tableBorderNS: NSColor(white: 0.75, alpha: 1),
         tableHeaderBgNS: NSColor(white: 0.94, alpha: 1),
+        selectionBackgroundNS: NSColor(red: 0.20, green: 0.47, blue: 0.96, alpha: 0.22),
+        selectedTextNS: .black,
         appearance: .aqua,
         colorScheme: .light
     )
@@ -83,6 +87,8 @@ struct Palette {
         linkNS: .systemBlue,
         tableBorderNS: NSColor(white: 0.30, alpha: 1),
         tableHeaderBgNS: NSColor(white: 0.18, alpha: 1),
+        selectionBackgroundNS: NSColor(red: 0.32, green: 0.56, blue: 1.00, alpha: 0.38),
+        selectedTextNS: .white,
         appearance: .darkAqua,
         colorScheme: .dark
     )

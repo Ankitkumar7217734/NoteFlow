@@ -18,14 +18,22 @@ struct NoteRow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
-            Text(highlighted(
-                source: note.title,
-                query: query,
-                size: 13,
-                baseWeight: isActive ? .semibold : .regular
-            ))
-            .foregroundColor(theme.palette.text)
-            .lineLimit(1)
+            HStack(spacing: 4) {
+                if note.isPinned {
+                    Image(systemName: "pin.fill")
+                        .font(.system(size: 9))
+                        .foregroundColor(theme.palette.iconColorDim)
+                        .rotationEffect(.degrees(45))
+                }
+                Text(highlighted(
+                    source: note.title,
+                    query: query,
+                    size: 13,
+                    baseWeight: isActive ? .semibold : .regular
+                ))
+                .foregroundColor(theme.palette.text)
+                .lineLimit(1)
+            }
 
             if let snippet = bodySnippet() {
                 Text(snippet)

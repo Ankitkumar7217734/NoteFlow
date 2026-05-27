@@ -7,6 +7,26 @@ enum EditorTypography {
     static var baseFont: NSFont { .systemFont(ofSize: baseFontSize) }
 }
 
+// Draws selection (and any .backgroundColor attribute run) with rounded
+// corners instead of the default sharp rectangle. The system rect-fill
+// looks blocky against the dark editor background; the radius softens
+// it the way modern editors render selection.
+final class NoteLayoutManager: NSLayoutManager {
+    override func fillBackgroundRectArray(_ rectArray: UnsafePointer<NSRect>,
+                                          count rectCount: Int,
+                                          forCharacterRange charRange: NSRange,
+                                          color: NSColor) {
+        color.set()
+        for i in 0..<rectCount {
+            // Inset 0.5pt vertically so consecutive lines of a multi-line
+            // selection don't visibly seam together at the radius corners.
+            let rect = rectArray[i].insetBy(dx: 0, dy: 0.5)
+            let path = NSBezierPath(roundedRect: rect, xRadius: 4, yRadius: 4)
+            path.fill()
+        }
+    }
+}
+
 // NSTextView subclass that sanitizes pasted content: strips background colors,
 // forces dark foreground, and rewrites the font family to the editor's base
 // font while preserving bold/italic/monospaced traits.
@@ -567,7 +587,7 @@ struct RichTextEditor: NSViewRepresentable {
     func makeNSView(context: Context) -> NSScrollView {
         // Build the text system bottom-up so we can plug in the shared storage.
         let storage = NoteStore.shared.sharedTextStorage(for: noteId)
-        let layoutManager = NSLayoutManager()
+        let layoutManager = NoteLayoutManager()
         storage.addLayoutManager(layoutManager)
         let textContainer = NSTextContainer(size: NSSize(
             width: 0, height: CGFloat.greatestFiniteMagnitude
@@ -586,11 +606,20 @@ struct RichTextEditor: NSViewRepresentable {
         textView.isAutomaticDataDetectionEnabled = true
         textView.textContainerInset = NSSize(width: 28, height: 28)
         // IMPORTANT: don't set textView.font here — it would wipe per-run
-        // fonts (bold/italic/mono) on the existing storage. textColor is OK
-        // because we strip explicit .foregroundColor at load (NoteStore) and
-        // at paste (sanitize), so runs without an explicit color pick up
-        // textView.textColor — which we drive from the active theme.
-        textView.typingAttributes = [.font: EditorTypography.baseFont]
+        // fonts (bold/italic/mono) on the existing storage.
+        //
+        // Use NSColor.textColor (the system semantic) for both the text
+        // view's default color and for typingAttributes. The dynamic
+        // color resolves to black/white based on the text view's
+        // appearance, so on theme switch — when only appearance changes
+        // and we don't touch textColor again — default text re-renders
+        // in the new theme color without overwriting user-applied
+        // colors anywhere in the storage.
+        textView.textColor = NSColor.textColor
+        textView.typingAttributes = [
+            .font: EditorTypography.baseFont,
+            .foregroundColor: NSColor.textColor
+        ]
         textView.isEditable = true
         textView.isSelectable = true
         textView.drawsBackground = true
@@ -627,15 +656,30 @@ struct RichTextEditor: NSViewRepresentable {
 
     // Push the palette's editor colors onto an NSTextView + its scroll view.
     // Used at construction and on every themeChanged notification.
+    //
+    // IMPORTANT: this method must not write to textView.textColor — that
+    // setter replaces the .foregroundColor of every character in the
+    // storage and wipes out user-picked colors from the formatting
+    // toolbar. textColor is set once in makeNSView using NSColor.textColor
+    // (a semantic system color that auto-adapts to textView.appearance);
+    // changing the appearance below is enough to re-render default-color
+    // text in the new theme.
     static func applyPalette(_ palette: Palette, to textView: NSTextView, scrollView: NSScrollView) {
         textView.backgroundColor = palette.editorBackgroundNS
-        textView.textColor = palette.textNS
         textView.insertionPointColor = palette.textNS
         textView.appearance = NSAppearance(named: palette.appearance)
         textView.linkTextAttributes = [
             .foregroundColor: palette.linkNS,
             .underlineStyle: NSUnderlineStyle.single.rawValue,
             .cursor: NSCursor.pointingHand
+        ]
+        // Theme-tuned text selection. NSTextView's default
+        // .selectedTextBackgroundColor is a system gray-blue that looks
+        // muddy on pure-black dark mode; a brighter accent blue with
+        // tuned alpha reads better in both themes.
+        textView.selectedTextAttributes = [
+            .backgroundColor: palette.selectionBackgroundNS,
+            .foregroundColor: palette.selectedTextNS
         ]
         scrollView.backgroundColor = palette.editorBackgroundNS
         scrollView.appearance = NSAppearance(named: palette.appearance)
@@ -699,35 +743,43 @@ struct NoteEditorView: View {
     let note: Note
 
     var body: some View {
-        ZStack(alignment: .bottomTrailing) {
-            RichTextEditor(noteId: note.id) { newText, _ in
-                // Title is edited in the tab bar — only save content here.
-                let rtf = try? newText.data(
-                    from: NSRange(location: 0, length: newText.length),
-                    documentAttributes: [.documentType: NSAttributedString.DocumentType.rtf]
-                )
-                store.updateNote(id: note.id, rtfData: rtf)
+        VStack(spacing: 0) {
+            ZStack(alignment: .bottomTrailing) {
+                RichTextEditor(noteId: note.id) { newText, _ in
+                    // Title is edited in the tab bar — only save content here.
+                    let rtf = try? newText.data(
+                        from: NSRange(location: 0, length: newText.length),
+                        documentAttributes: [.documentType: NSAttributedString.DocumentType.rtf]
+                    )
+                    store.updateNote(id: note.id, rtfData: rtf)
+                }
+
+                // Copy button
+                Button {
+                    let plain = note.attributedContent.string
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(plain, forType: .string)
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "doc.on.doc")
+                            .font(.system(size: 13))
+                        Text("Copy")
+                            .font(.system(size: 14, weight: .medium))
+                    }
+                    .foregroundColor(theme.palette.copyButtonText)
+                    .padding(.horizontal, 18)
+                    .padding(.vertical, 10)
+                    .background(theme.palette.copyButtonBackground, in: Capsule())
+                }
+                .buttonStyle(.plain)
+                .padding(20)
             }
 
-            // Copy button
-            Button {
-                let plain = note.attributedContent.string
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(plain, forType: .string)
-            } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: "doc.on.doc")
-                        .font(.system(size: 13))
-                    Text("Copy")
-                        .font(.system(size: 14, weight: .medium))
-                }
-                .foregroundColor(theme.palette.copyButtonText)
-                .padding(.horizontal, 18)
-                .padding(.vertical, 10)
-                .background(theme.palette.copyButtonBackground, in: Capsule())
-            }
-            .buttonStyle(.plain)
-            .padding(20)
+            Rectangle()
+                .fill(theme.palette.dividerColor)
+                .frame(height: 1)
+
+            TagBar(note: note)
         }
     }
 }

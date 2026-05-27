@@ -32,18 +32,52 @@ class NoteStore: ObservableObject {
         if let note = notes.first(where: { $0.id == id }) {
             let attr = note.attributedContent
             if attr.length > 0 {
-                // Strip baked-in foreground color so the text view's
-                // theme-driven textColor drives the default. Otherwise notes
-                // saved in light mode (with NSColor.black baked into the RTF)
-                // would render black-on-dark in dark mode.
+                // Strip only the foreground colors that match a theme's
+                // default text color, so notes saved in light/dark mode
+                // adapt to the current theme — but user-applied colors
+                // (red, blue, etc. from the Text Formatting picker) are
+                // preserved.
                 let mutable = NSMutableAttributedString(attributedString: attr)
-                mutable.removeAttribute(.foregroundColor,
-                                        range: NSRange(location: 0, length: mutable.length))
+                Self.stripThemeDefaultForegroundColors(in: mutable)
                 storage.setAttributedString(mutable)
             }
         }
         sharedStorages[id] = storage
         return storage
+    }
+
+    // Colors the editor uses as a "default" text color (one per theme).
+    // We compare against these when deciding which foreground colors to
+    // strip so the user's explicitly-picked colors survive.
+    private static let themeDefaultColors: [NSColor] = [
+        .black,                                      // legacy + light theme
+        NSColor(white: 0.91, alpha: 1)               // dark theme
+    ]
+
+    private static func isThemeDefault(_ color: NSColor) -> Bool {
+        guard let c = color.usingColorSpace(.sRGB) else { return false }
+        for ref in themeDefaultColors {
+            guard let r = ref.usingColorSpace(.sRGB) else { continue }
+            if abs(c.redComponent - r.redComponent) < 0.02
+                && abs(c.greenComponent - r.greenComponent) < 0.02
+                && abs(c.blueComponent - r.blueComponent) < 0.02 {
+                return true
+            }
+        }
+        return false
+    }
+
+    static func stripThemeDefaultForegroundColors(in storage: NSMutableAttributedString) {
+        guard storage.length > 0 else { return }
+        let full = NSRange(location: 0, length: storage.length)
+        var rangesToClear: [NSRange] = []
+        storage.enumerateAttribute(.foregroundColor, in: full, options: []) { value, range, _ in
+            guard let color = value as? NSColor else { return }
+            if isThemeDefault(color) { rangesToClear.append(range) }
+        }
+        for range in rangesToClear {
+            storage.removeAttribute(.foregroundColor, range: range)
+        }
     }
 
     private var saveURL: URL {
@@ -57,15 +91,44 @@ class NoteStore: ObservableObject {
 
     var activeNote: Note? { notes.first(where: { $0.id == activeTabId }) }
 
-    /// Notes sorted by most-recently-updated, optionally filtered by a
-    /// per-window search query (matches title or body).
-    func filteredNotes(matching query: String = "") -> [Note] {
-        let sorted = notes.sorted { $0.updatedAt > $1.updatedAt }
-        if query.isEmpty { return sorted }
-        return sorted.filter { note in
-            if note.title.localizedCaseInsensitiveContains(query) { return true }
-            return plainText(for: note.id).localizedCaseInsensitiveContains(query)
+    /// Notes filtered by a per-window search query and/or tag, then sorted
+    /// pinned-first within each group. Excludes trashed notes — those live
+    /// behind the Trash view. Pinned ordering: pinned notes by updatedAt
+    /// desc, then unpinned by updatedAt desc.
+    func filteredNotes(matching query: String = "", tag: String? = nil) -> [Note] {
+        var result = notes.filter { !$0.isTrashed }
+
+        if let tag = tag, !tag.isEmpty {
+            result = result.filter { $0.tags.contains(tag) }
         }
+
+        if !query.isEmpty {
+            result = result.filter { note in
+                if note.title.localizedCaseInsensitiveContains(query) { return true }
+                if note.tags.contains(where: { $0.localizedCaseInsensitiveContains(query) }) { return true }
+                return plainText(for: note.id).localizedCaseInsensitiveContains(query)
+            }
+        }
+
+        return result.sorted { a, b in
+            if a.isPinned != b.isPinned { return a.isPinned }
+            return a.updatedAt > b.updatedAt
+        }
+    }
+
+    /// Every distinct tag across non-trashed notes, sorted alphabetically.
+    var allTags: [String] {
+        var set = Set<String>()
+        for note in notes where !note.isTrashed {
+            for tag in note.tags { set.insert(tag) }
+        }
+        return set.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+    }
+
+    /// Trashed notes, most-recently-deleted first.
+    var trashedNotes: [Note] {
+        notes.filter { $0.isTrashed }
+            .sorted { ($0.deletedAt ?? .distantPast) > ($1.deletedAt ?? .distantPast) }
     }
 
     /// Returns the note's body as plain text. Prefers the live NSTextStorage
@@ -80,7 +143,31 @@ class NoteStore: ObservableObject {
         return plain
     }
 
-    init() { load() }
+    init() {
+        load()
+        // When the theme flips, any text the user has already typed in the
+        // current session has an explicit .foregroundColor baked into its
+        // shared NSTextStorage from typingAttributes. Without stripping, it
+        // stays the old theme's color and renders invisible against the new
+        // background. We strip across every in-memory storage so newly
+        // opened notes are also correct.
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(stripForegroundColorsAcrossStorages),
+            name: .themeChanged, object: nil
+        )
+    }
+
+    @objc private func stripForegroundColorsAcrossStorages() {
+        // Only clear runs whose color matches a theme default (the
+        // implicit black/light text color baked in by typingAttributes).
+        // User-picked colors from the formatting toolbar — red, blue,
+        // etc. — keep their value across theme flips.
+        for (_, storage) in sharedStorages where storage.length > 0 {
+            storage.beginEditing()
+            Self.stripThemeDefaultForegroundColors(in: storage)
+            storage.endEditing()
+        }
+    }
 
     func newNote() {
         var note = Note()
@@ -118,12 +205,63 @@ class NoteStore: ObservableObject {
         save()
     }
 
+    func togglePin(_ id: UUID) {
+        guard let idx = notes.firstIndex(where: { $0.id == id }) else { return }
+        notes[idx].isPinned.toggle()
+        save()
+    }
+
+    /// Add `tag` to the note if not already present. Tags are trimmed and
+    /// lowercased to keep "Work" and " work " from being treated as
+    /// different tags.
+    func addTag(_ tag: String, to id: UUID) {
+        let normalized = tag.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !normalized.isEmpty else { return }
+        guard let idx = notes.firstIndex(where: { $0.id == id }) else { return }
+        if !notes[idx].tags.contains(normalized) {
+            notes[idx].tags.append(normalized)
+            save()
+        }
+    }
+
+    func removeTag(_ tag: String, from id: UUID) {
+        guard let idx = notes.firstIndex(where: { $0.id == id }) else { return }
+        notes[idx].tags.removeAll { $0 == tag }
+        save()
+    }
+
+    /// Soft-delete: move the note to the Trash. Tab is closed (since the
+    /// main list hides trashed notes) but storage + plain-text cache are
+    /// preserved so Restore returns the note intact, including any edits
+    /// that hadn't been re-encoded to RTF yet.
     func deleteNote(_ id: UUID) {
+        guard let idx = notes.firstIndex(where: { $0.id == id }) else { return }
+        notes[idx].deletedAt = Date()
         closeTab(id)
+        save()
+    }
+
+    /// Bring a trashed note back to the active list. Doesn't reopen it as
+    /// a tab — the user can click it in the sidebar to do that.
+    func restoreNote(_ id: UUID) {
+        guard let idx = notes.firstIndex(where: { $0.id == id }) else { return }
+        notes[idx].deletedAt = nil
+        save()
+    }
+
+    /// Permanent deletion — drops the note, its shared storage, and its
+    /// plain-text cache. No undo.
+    func permanentlyDeleteNote(_ id: UUID) {
         notes.removeAll { $0.id == id }
         sharedStorages.removeValue(forKey: id)
         plainTextCache.removeValue(forKey: id)
         save()
+    }
+
+    /// Permanently delete every trashed note.
+    func emptyTrash() {
+        let ids = trashedNotes.map { $0.id }
+        for id in ids { permanentlyDeleteNote(id) }
     }
 
     private func load() {
@@ -133,9 +271,11 @@ class NoteStore: ObservableObject {
             return
         }
         notes = decoded
-        if let first = notes.first {
-            openTabIds = [first.id]
-            activeTabId = first.id
+        // Don't auto-open a trashed note. If everything is trashed (or the
+        // file is empty), fall through to creating a fresh note.
+        if let firstActive = notes.first(where: { !$0.isTrashed }) {
+            openTabIds = [firstActive.id]
+            activeTabId = firstActive.id
         } else {
             newNote()
         }

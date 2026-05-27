@@ -100,10 +100,79 @@ struct FormattingToolbarView: View {
                     showTablePopover = false
                 }
             }
+
+            ToolbarDivider()
+
+            // Text color: 7 swatches + a reset button. Click applies the
+            // color to the current selection; with no selection, the
+            // typingAttributes update so the next typed characters use it.
+            ForEach(Self.colorPalette, id: \.label) { swatch in
+                ColorSwatchButton(color: swatch.color, tooltip: swatch.label) {
+                    applyForegroundColor(swatch.color)
+                }
+            }
+            Button {
+                applyForegroundColor(nil)
+            } label: {
+                Image(systemName: "drop.halffull")
+                    .font(.system(size: 13))
+                    .foregroundColor(.primary)
+                    .frame(width: 26, height: 26)
+            }
+            .buttonStyle(.plain)
+            .help("Default color")
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
         .background(.ultraThinMaterial)
+    }
+
+    // MARK: – Text color
+
+    private struct ColorSwatch {
+        let label: String
+        let color: NSColor
+    }
+
+    private static let colorPalette: [ColorSwatch] = [
+        .init(label: "Red",    color: .systemRed),
+        .init(label: "Orange", color: .systemOrange),
+        .init(label: "Yellow", color: .systemYellow),
+        .init(label: "Green",  color: .systemGreen),
+        .init(label: "Blue",   color: .systemBlue),
+        .init(label: "Purple", color: .systemPurple),
+        .init(label: "Pink",   color: .systemPink)
+    ]
+
+    /// Apply `color` (or strip the foreground attribute when `nil`) to the
+    /// active text view's selection. With no selection, update the typing
+    /// attributes so the next typed run picks up the chosen color.
+    private func applyForegroundColor(_ color: NSColor?) {
+        guard let tv = activeTextView() else { return }
+        let range = tv.selectedRange()
+
+        if range.length == 0 {
+            var typing = tv.typingAttributes
+            if let color = color {
+                typing[.foregroundColor] = color
+            } else {
+                typing.removeValue(forKey: .foregroundColor)
+            }
+            tv.typingAttributes = typing
+            return
+        }
+
+        guard let storage = tv.textStorage,
+              tv.shouldChangeText(in: range, replacementString: nil) else { return }
+
+        storage.beginEditing()
+        if let color = color {
+            storage.addAttribute(.foregroundColor, value: color, range: range)
+        } else {
+            storage.removeAttribute(.foregroundColor, range: range)
+        }
+        storage.endEditing()
+        tv.didChangeText()
     }
 
     // MARK: – Lookup helpers
@@ -522,5 +591,28 @@ struct ToolbarDivider: View {
             .fill(Color.primary.opacity(0.15))
             .frame(width: 1, height: 20)
             .padding(.horizontal, 4)
+    }
+}
+
+// Small circular color swatch — used by the text-color picker in the
+// formatting toolbar. A subtle border keeps light-colored swatches
+// (yellow, pink) visible against the toolbar's translucent background.
+struct ColorSwatchButton: View {
+    let color: NSColor
+    let tooltip: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Circle()
+                .fill(Color(nsColor: color))
+                .frame(width: 16, height: 16)
+                .overlay(
+                    Circle().stroke(Color.primary.opacity(0.25), lineWidth: 0.5)
+                )
+                .frame(width: 26, height: 26)
+        }
+        .buttonStyle(.plain)
+        .help(tooltip)
     }
 }
