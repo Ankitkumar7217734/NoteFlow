@@ -7,6 +7,7 @@ struct FormattingToolbarView: View {
     @State private var savedTextView: NSTextView?
     @State private var savedRange = NSRange(location: 0, length: 0)
     @State private var showTablePopover = false
+    @State private var showColorPopover = false
 
     var body: some View {
         HStack(spacing: 2) {
@@ -62,7 +63,7 @@ struct FormattingToolbarView: View {
                 Image(systemName: "link")
                     .font(.system(size: 14))
                     .foregroundColor(.primary)
-                    .frame(width: 32, height: 30)
+                    .frame(width: 32, height: 28)
             }
             .buttonStyle(.plain)
             .help("Add Link")
@@ -90,7 +91,7 @@ struct FormattingToolbarView: View {
                 Image(systemName: "tablecells")
                     .font(.system(size: 14))
                     .foregroundColor(.primary)
-                    .frame(width: 32, height: 30)
+                    .frame(width: 32, height: 28)
             }
             .buttonStyle(.plain)
             .help("Insert Table")
@@ -103,28 +104,62 @@ struct FormattingToolbarView: View {
 
             ToolbarDivider()
 
-            // Text color: 7 swatches + a reset button. Click applies the
-            // color to the current selection; with no selection, the
-            // typingAttributes update so the next typed characters use it.
-            ForEach(Self.colorPalette, id: \.label) { swatch in
-                ColorSwatchButton(color: swatch.color, tooltip: swatch.label) {
-                    applyForegroundColor(swatch.color)
-                }
-            }
+            // Text color: collapsed into a single swatch that opens a popover
+            // with the palette + reset, so the toolbar stays compact instead
+            // of laying all 7 colors inline. Capture the editor's text view +
+            // selection before the popover steals focus (same as link/table).
             Button {
-                applyForegroundColor(nil)
+                if let tv = activeTextView() {
+                    savedTextView = tv
+                    savedRange = tv.selectedRange()
+                }
+                showColorPopover = true
             } label: {
-                Image(systemName: "drop.halffull")
-                    .font(.system(size: 13))
+                Image(systemName: "paintpalette")
+                    .font(.system(size: 14))
                     .foregroundColor(.primary)
-                    .frame(width: 26, height: 26)
+                    .frame(width: 32, height: 28)
             }
             .buttonStyle(.plain)
-            .help("Default color")
+            .help("Text Color")
+            .popover(isPresented: $showColorPopover, arrowEdge: .bottom) {
+                colorPopover
+            }
         }
         .padding(.horizontal, 16)
-        .padding(.vertical, 10)
+        .padding(.vertical, 6)
         .background(.ultraThinMaterial)
+    }
+
+    // Palette + "default color" reset shown when the text-color button is
+    // tapped. Each choice applies to the selection captured when the popover
+    // opened, then dismisses.
+    private var colorPopover: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                ForEach(Self.colorPalette, id: \.label) { swatch in
+                    ColorSwatchButton(color: swatch.color, tooltip: swatch.label) {
+                        applyForegroundColor(swatch.color)
+                        showColorPopover = false
+                    }
+                }
+            }
+            Divider()
+            Button {
+                applyForegroundColor(nil)
+                showColorPopover = false
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "drop.halffull")
+                        .font(.system(size: 13))
+                    Text("Default color")
+                        .font(.system(size: 12))
+                }
+                .foregroundColor(.primary)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(14)
     }
 
     // MARK: – Text color
@@ -148,8 +183,13 @@ struct FormattingToolbarView: View {
     /// active text view's selection. With no selection, update the typing
     /// attributes so the next typed run picks up the chosen color.
     private func applyForegroundColor(_ color: NSColor?) {
-        guard let tv = activeTextView() else { return }
-        let range = tv.selectedRange()
+        // Prefer the text view + selection captured when the popover opened —
+        // presenting it takes first responder, so the live selection is gone.
+        let tv = savedTextView ?? activeTextView()
+        guard let tv = tv else { return }
+        let range = (savedTextView != nil) ? savedRange : tv.selectedRange()
+        savedTextView = nil
+        tv.window?.makeFirstResponder(tv)
 
         if range.length == 0 {
             var typing = tv.typingAttributes
@@ -173,6 +213,8 @@ struct FormattingToolbarView: View {
         }
         storage.endEditing()
         tv.didChangeText()
+        // Restore the selection so the user can see what they recolored.
+        tv.setSelectedRange(range)
     }
 
     // MARK: – Lookup helpers
@@ -561,7 +603,7 @@ struct FormatButton: View {
                 .italic(isItalic)
                 .underline(underline)
                 .foregroundColor(.primary)
-                .frame(width: 32, height: 30)
+                .frame(width: 32, height: 28)
         }
         .buttonStyle(.plain)
         .help(tooltip)
@@ -578,7 +620,7 @@ struct FormatIconButton: View {
             Image(systemName: icon)
                 .font(.system(size: 14))
                 .foregroundColor(.primary)
-                .frame(width: 32, height: 30)
+                .frame(width: 32, height: 28)
         }
         .buttonStyle(.plain)
         .help(tooltip)

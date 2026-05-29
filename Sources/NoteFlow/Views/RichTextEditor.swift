@@ -34,9 +34,6 @@ final class NoteTextView: NSTextView {
     // The link the user pressed mouse-down on, if any. Held until mouseUp so
     // we can distinguish a click (open) from a drag (select).
     private var pendingLinkInfo: (url: URL, range: NSRange)?
-    // Click-generation counter — bumped on every double-click so any
-    // pending single-click "open in browser" knows to cancel itself.
-    private var clickGeneration = 0
     // Keeps the rename popover alive while it's showing.
     private var renamePopover: NSPopover?
     // The link captured at the moment the context menu was built, so the
@@ -143,15 +140,18 @@ final class NoteTextView: NSTextView {
         didChangeText()
     }
 
-    // MARK: – Click-to-open + double-click-to-rename
+    // MARK: – Link clicks (⌘-click or double-click opens; plain click edits)
 
     override func mouseDown(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
         pendingLinkInfo = linkInfo(atViewPoint: point)
 
-        // Double-click on a link: suppress the default word-selection so a
-        // selected word isn't left behind after the link opens.
-        if event.clickCount == 2 && pendingLinkInfo != nil {
+        // ⌘-click or double-click on a link opens it (handled in mouseUp).
+        // Swallow the default mouseDown for those gestures so they don't also
+        // place a caret or select the link's word. A plain click falls
+        // through to NSTextView and just positions the insertion point.
+        let opensLink = event.modifierFlags.contains(.command) || event.clickCount == 2
+        if pendingLinkInfo != nil && opensLink {
             return
         }
         super.mouseDown(with: event)
@@ -161,27 +161,18 @@ final class NoteTextView: NSTextView {
         let info = pendingLinkInfo
         pendingLinkInfo = nil
 
-        // Double-click on a link → open it. Bumping the generation cancels
-        // any rename popover that mouseUp #1 already scheduled.
-        if event.clickCount == 2, let info = info {
-            clickGeneration += 1
+        // ⌘-click or double-click on a link → open it in the browser right
+        // away. A plain single click falls through to NSTextView's default
+        // handling, which just places the caret; links are renamed via the
+        // right-click context menu, so there's no deferred popover and no
+        // perceptible delay on an ordinary click.
+        let opensLink = event.modifierFlags.contains(.command) || event.clickCount == 2
+        if let info = info, opensLink {
             NSWorkspace.shared.open(info.url)
             return
         }
 
         super.mouseUp(with: event)
-
-        // Single click on a link → defer showing the rename popover by the
-        // system's double-click interval, so a quick second click can
-        // cancel the popover and open the link instead.
-        if event.clickCount == 1, let info = info, selectedRange().length == 0 {
-            let myGen = clickGeneration
-            let delay = NSEvent.doubleClickInterval + 0.05
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-                guard let self = self, self.clickGeneration == myGen else { return }
-                self.showRenamePopover(currentURL: info.url, range: info.range)
-            }
-        }
     }
 
     private func linkInfo(atViewPoint viewPoint: NSPoint) -> (url: URL, range: NSRange)? {
@@ -217,8 +208,8 @@ final class NoteTextView: NSTextView {
     // MARK: – Right-click context menu
 
     // Inject a "Rename Link…" item into NSTextView's default contextual
-    // menu when the click lands on a link, so two-finger / right-click
-    // gives the user the same rename popover as a single click.
+    // menu when the click lands on a link. Right-click is the primary way
+    // to rename a link now (a plain single click just places the caret).
     override func menu(for event: NSEvent) -> NSMenu? {
         let menu = super.menu(for: event)
         let point = convert(event.locationInWindow, from: nil)
@@ -582,7 +573,7 @@ final class NoteTextView: NSTextView {
 // instantly reflects in the other.
 struct RichTextEditor: NSViewRepresentable {
     let noteId: UUID
-    var onTextChange: (NSAttributedString, String) -> Void
+    var onTextChange: () -> Void
 
     func makeNSView(context: Context) -> NSScrollView {
         // Build the text system bottom-up so we can plug in the shared storage.
@@ -646,6 +637,19 @@ struct RichTextEditor: NSViewRepresentable {
         textView.isHorizontallyResizable = false
         textView.autoresizingMask = [.width]
 
+        // Land the cursor in the note body when this editor is created (new
+        // note, note switch, launch). Otherwise the window's initial first
+        // responder is the first focusable control — now the tag field that
+        // sits above the editor — so adding a note dropped the cursor into
+        // "Add tag…". Deferred so the text view is in its window first; only
+        // claims focus in the key window so it can't steal from the floating
+        // panel when a note switch rebuilds the (background) main editor.
+        DispatchQueue.main.async { [weak textView] in
+            guard let textView = textView,
+                  let window = textView.window, window.isKeyWindow else { return }
+            window.makeFirstResponder(textView)
+        }
+
         return scrollView
     }
 
@@ -700,12 +704,12 @@ struct RichTextEditor: NSViewRepresentable {
     }
 
     class Coordinator: NSObject, NSTextViewDelegate {
-        var onTextChange: (NSAttributedString, String) -> Void
+        var onTextChange: () -> Void
         weak var textView: NSTextView?
         weak var scrollView: NSScrollView?
         private var themeObserver: NSObjectProtocol?
 
-        init(onTextChange: @escaping (NSAttributedString, String) -> Void) {
+        init(onTextChange: @escaping () -> Void) {
             self.onTextChange = onTextChange
         }
 
@@ -726,12 +730,10 @@ struct RichTextEditor: NSViewRepresentable {
         }
 
         func textDidChange(_ notification: Notification) {
-            guard let tv = notification.object as? NSTextView else { return }
-            let content = tv.attributedString()
-            let plain = tv.string
-            let firstLine = plain.components(separatedBy: "\n").first(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty }) ?? "Untitled"
-            let title = String(firstLine.prefix(60)).trimmingCharacters(in: .whitespaces)
-            onTextChange(content, title.isEmpty ? "Untitled" : title)
+            // Cheap by design: just notify. NoteStore reads the shared text
+            // storage and debounces the RTF-encode + disk write, so there's
+            // no per-keystroke serialization on the main thread here.
+            onTextChange()
         }
     }
 }
@@ -744,19 +746,25 @@ struct NoteEditorView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            TagBar(note: note)
+
+            Rectangle()
+                .fill(theme.palette.dividerColor)
+                .frame(height: 1)
+
             ZStack(alignment: .bottomTrailing) {
-                RichTextEditor(noteId: note.id) { newText, _ in
-                    // Title is edited in the tab bar — only save content here.
-                    let rtf = try? newText.data(
-                        from: NSRange(location: 0, length: newText.length),
-                        documentAttributes: [.documentType: NSAttributedString.DocumentType.rtf]
-                    )
-                    store.updateNote(id: note.id, rtfData: rtf)
+                RichTextEditor(noteId: note.id) {
+                    // The shared NSTextStorage is the live source of truth;
+                    // NoteStore debounces the RTF-encode + disk write so typing
+                    // never blocks on serialization (see noteBodyDidChange).
+                    store.noteBodyDidChange(note.id)
                 }
 
                 // Copy button
                 Button {
-                    let plain = note.attributedContent.string
+                    // Read the live storage — note.rtfData is only refreshed
+                    // when the debounced save fires, so it can lag the screen.
+                    let plain = store.plainText(for: note.id)
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(plain, forType: .string)
                 } label: {
@@ -774,12 +782,6 @@ struct NoteEditorView: View {
                 .buttonStyle(.plain)
                 .padding(20)
             }
-
-            Rectangle()
-                .fill(theme.palette.dividerColor)
-                .frame(height: 1)
-
-            TagBar(note: note)
         }
     }
 }

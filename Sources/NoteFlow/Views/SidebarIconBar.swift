@@ -21,8 +21,10 @@ struct SidebarIconBar: View {
             if isExpanded {
                 if windowState.viewingTrash {
                     trashList
+                        .transition(.opacity)
                 } else {
                     notesList
+                        .transition(.opacity)
                 }
             } else {
                 Spacer(minLength: 0)
@@ -156,6 +158,7 @@ struct SidebarIconBar: View {
 
     private func noteListRow(_ note: Note) -> some View {
         NoteListRow(noteId: note.id)
+            .transition(.opacity)
     }
 
     private func sectionHeader(_ title: String) -> some View {
@@ -240,6 +243,7 @@ struct SidebarIconBar: View {
                         ForEach(trashed) { note in
                             NoteRow(note: note, isActive: false, query: "")
                                 .opacity(0.65)
+                                .transition(.opacity)
                                 .contentShape(Rectangle())
                                 .contextMenu {
                                     Button {
@@ -343,6 +347,7 @@ struct SidebarRow: View {
                         .font(.system(size: 13))
                         .foregroundColor(theme.palette.text)
                         .frame(maxWidth: .infinity, alignment: .leading)
+                        .transition(.opacity)
                 }
             }
         }

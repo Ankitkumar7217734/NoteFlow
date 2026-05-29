@@ -66,6 +66,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 
+    // Persist any debounced, not-yet-written edits when the app loses focus
+    // or quits, so the last keystrokes before switching away / quitting are
+    // never lost. flushPendingSaves() no-ops when nothing is dirty.
+    func applicationWillResignActive(_ notification: Notification) {
+        NoteStore.shared.flushPendingSaves()
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        NoteStore.shared.flushPendingSaves()
+    }
+
     // Install the pre-processed logo (cropped + rounded) as the Dock icon.
     // Done in-process since this is a `swift run` executable with no .icns
     // in an .app bundle — the icon is set fresh on every launch.
@@ -129,7 +140,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 x: screen.midX - floatingSize.width / 2,
                 y: screen.midY - floatingSize.height / 2
             )
-            floatingPanel.setFrame(NSRect(origin: origin, size: floatingSize), display: true, animate: true)
+            // Entrance animation: start a touch lower and fully transparent,
+            // then rise + fade into place. Driven by the panel's animator via
+            // NSAnimationContext so we never call NSApp.activate (which would
+            // yank the user off their current Space — see the note below).
+            let finalFrame = NSRect(origin: origin, size: floatingSize)
+            floatingPanel.alphaValue = 0
+            floatingPanel.setFrame(finalFrame.offsetBy(dx: 0, dy: -12), display: false)
             // DO NOT call NSApp.activate(...) here — that would pull the user
             // off the current Space (e.g. another app's full-screen Space) and
             // back to NoteFlow's main window's Space. The .nonactivatingPanel
@@ -137,6 +154,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             // without activating NoteFlow, so it overlays on the current Space.
             floatingPanel.orderFrontRegardless()
             floatingPanel.makeKeyAndOrderFront(nil)
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0.18
+                floatingPanel.animator().alphaValue = 1
+                floatingPanel.animator().setFrame(finalFrame, display: true)
+            }
 
             // Focus the editor inside the panel so the user can type immediately.
             DispatchQueue.main.async { [weak self] in

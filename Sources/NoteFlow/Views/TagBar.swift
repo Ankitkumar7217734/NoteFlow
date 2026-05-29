@@ -32,7 +32,7 @@ struct TagBar: View {
                     .onSubmit(commitDraft)
             }
             .padding(.horizontal, 14)
-            .padding(.vertical, 8)
+            .padding(.vertical, 5)
         }
         .background(theme.palette.chromeBackground)
     }

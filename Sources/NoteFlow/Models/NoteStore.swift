@@ -24,6 +24,16 @@ class NoteStore: ObservableObject {
     // re-renders in the other without going through @Published or RTF.
     private var sharedStorages: [UUID: NSTextStorage] = [:]
 
+    // Debounced persistence. Typing calls noteBodyDidChange(_:), which marks
+    // the note's id dirty and (re)arms a timer instead of encoding RTF +
+    // writing notes.json on every keystroke. The shared NSTextStorage holds
+    // the live text in the meantime, so nothing is lost; flushPendingSaves()
+    // encodes from it and writes once typing pauses (and on app
+    // resign/terminate, so quitting never drops the last edits).
+    private var pendingDirtyNoteIds: Set<UUID> = []
+    private var saveDebounceTimer: Timer?
+    private let saveDebounceInterval: TimeInterval = 0.6
+
     func sharedTextStorage(for id: UUID) -> NSTextStorage {
         if let existing = sharedStorages[id] {
             return existing
@@ -170,8 +180,10 @@ class NoteStore: ObservableObject {
     }
 
     func newNote() {
-        var note = Note()
-        notes.insert(note, at: 0)
+        let note = Note()
+        withAnimation(.easeInOut(duration: 0.22)) {
+            notes.insert(note, at: 0)
+        }
         openTabIds.append(note.id)
         activeTabId = note.id
         save()
@@ -205,9 +217,49 @@ class NoteStore: ObservableObject {
         save()
     }
 
+    /// Called from the editor on every keystroke. Cheap: marks the note's
+    /// body dirty and (re)arms the debounce timer. The actual RTF-encode +
+    /// disk write happen in flushPendingSaves() once typing pauses.
+    func noteBodyDidChange(_ id: UUID) {
+        pendingDirtyNoteIds.insert(id)
+        saveDebounceTimer?.invalidate()
+        saveDebounceTimer = Timer.scheduledTimer(
+            withTimeInterval: saveDebounceInterval, repeats: false
+        ) { [weak self] _ in
+            self?.flushPendingSaves()
+        }
+    }
+
+    /// Encode every dirty note's live NSTextStorage to RTF, fold it into the
+    /// model, and persist. No-ops when nothing is dirty, so it's safe to call
+    /// eagerly (e.g. on app resign/terminate). Synchronous so it completes
+    /// before the process exits on quit.
+    func flushPendingSaves() {
+        saveDebounceTimer?.invalidate()
+        saveDebounceTimer = nil
+        guard !pendingDirtyNoteIds.isEmpty else { return }
+        let ids = pendingDirtyNoteIds
+        pendingDirtyNoteIds.removeAll()
+        let now = Date()
+        for id in ids {
+            guard let idx = notes.firstIndex(where: { $0.id == id }),
+                  let storage = sharedStorages[id] else { continue }
+            let full = NSRange(location: 0, length: storage.length)
+            notes[idx].rtfData = try? storage.data(
+                from: full,
+                documentAttributes: [.documentType: NSAttributedString.DocumentType.rtf]
+            )
+            notes[idx].updatedAt = now
+            plainTextCache.removeValue(forKey: id)
+        }
+        save()
+    }
+
     func togglePin(_ id: UUID) {
         guard let idx = notes.firstIndex(where: { $0.id == id }) else { return }
-        notes[idx].isPinned.toggle()
+        withAnimation(.easeInOut(duration: 0.22)) {
+            notes[idx].isPinned.toggle()
+        }
         save()
     }
 
@@ -236,7 +288,9 @@ class NoteStore: ObservableObject {
     /// that hadn't been re-encoded to RTF yet.
     func deleteNote(_ id: UUID) {
         guard let idx = notes.firstIndex(where: { $0.id == id }) else { return }
-        notes[idx].deletedAt = Date()
+        withAnimation(.easeInOut(duration: 0.22)) {
+            notes[idx].deletedAt = Date()
+        }
         closeTab(id)
         save()
     }
@@ -245,14 +299,18 @@ class NoteStore: ObservableObject {
     /// a tab — the user can click it in the sidebar to do that.
     func restoreNote(_ id: UUID) {
         guard let idx = notes.firstIndex(where: { $0.id == id }) else { return }
-        notes[idx].deletedAt = nil
+        withAnimation(.easeInOut(duration: 0.22)) {
+            notes[idx].deletedAt = nil
+        }
         save()
     }
 
     /// Permanent deletion — drops the note, its shared storage, and its
     /// plain-text cache. No undo.
     func permanentlyDeleteNote(_ id: UUID) {
-        notes.removeAll { $0.id == id }
+        withAnimation(.easeInOut(duration: 0.22)) {
+            notes.removeAll { $0.id == id }
+        }
         sharedStorages.removeValue(forKey: id)
         plainTextCache.removeValue(forKey: id)
         save()

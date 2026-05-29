@@ -70,9 +70,11 @@ Registered via Carbon `RegisterEventHotKey` (not `NSEvent.addGlobalMonitorForEve
 - `isFloating` — global so each window's `TabBarView` can adapt its close/expand buttons.
 - Persistence to `~/Library/Application Support/NoteFlow/notes.json`.
 
-`WindowState` is a separate per-`ContentView` `ObservableObject` for *UI* state (sidebar open, search text, formatting toolbar visibility, search-focus request). Each `ContentView` instantiates its own with `@StateObject`, so toggling the sidebar in the main window doesn't toggle it in the floating panel.
+`WindowState` is a separate per-`ContentView` `ObservableObject` for *UI* state (sidebar open, search text, formatting toolbar visibility, search-focus request, `viewingTrash`, and the `selectedTag` tag filter). Each `ContentView` instantiates its own with `@StateObject`, so toggling the sidebar in the main window doesn't toggle it in the floating panel.
 
-`Note` is a `Codable` struct. Rich text is stored as RTF `Data`; titles are stored separately on the struct (not auto-extracted at load).
+`Note` is a `Codable` struct. Rich text is stored as RTF `Data`; titles are stored separately on the struct (not auto-extracted at load). It also carries `deletedAt` (non-nil ⇒ trashed), `isPinned`, and `tags: [String]`. A hand-written `init(from:)` decodes missing keys to safe defaults, so `notes.json` written by older versions (which lacked these fields) still loads.
+
+**Trash, pinning, tags.** `deleteNote` is a *soft* delete — it sets `deletedAt` and closes the tab but keeps the note's shared `NSTextStorage` + plain-text cache, so `restoreNote` brings it back intact (including edits not yet re-encoded to RTF). `permanentlyDeleteNote` / `emptyTrash` are the hard deletes that also drop the storage and cache. `togglePin` and `addTag`/`removeTag` round out mutation — tags are normalized to trimmed-lowercase, so `Work` and ` work ` collapse to one. `filteredNotes(matching:tag:)` is the sidebar's list source: it drops trashed notes, applies the optional tag filter + search query (matches title, tags, then cached plain text), and sorts **pinned-first, then `updatedAt` descending**. Trashed notes are reached separately via `trashedNotes` and the sidebar's Trash view.
 
 **Cross-window live editing:** `NoteStore.sharedTextStorage(for: noteId)` returns a single `NSTextStorage` per note ID, reused by every `NSTextView` editing that note. Because an `NSTextStorage` notifies all attached `NSLayoutManager`s on every edit, a keystroke in the main window's editor instantly re-renders in the floating panel's editor (and vice versa) without going through `@Published` or re-encoding RTF. `RichTextEditor` must attach to this shared storage rather than creating its own.
 
@@ -98,6 +100,7 @@ NoteFlowApp (@main)
     │           ├── SidebarIconBar        # Unified rail + labels + notes list + search
     │           └── NoteEditorView        # in RichTextEditor.swift
     │               ├── RichTextEditor    # NSTextView via NSViewRepresentable
+    │               ├── TagBar            # removable tag chips + "Add tag…" field
     │               └── FormattingToolbarView  # shown when WindowState.formattingVisible
     └── floatingPanel (FloatingPanel/NSPanel)
         └── ContentView(isFloatingPanel: true)   # Same component, separate WindowState, same NoteStore.shared
@@ -105,8 +108,16 @@ NoteFlowApp (@main)
 
 The close button in `TabBarView` checks `store.isFloating`: if `true` it calls `AppDelegate.toggleFloating()` (dismiss panel); otherwise it closes the main window. `NoteListPanel.swift` only defines `NoteRow` now — the panel itself is folded into `SidebarIconBar`.
 
-### Appearance
+### Appearance & theming
 
-All windows and hosting views are pinned to `.aqua` appearance so text and icons always render dark on the cream background (`#F0F0EA` / `NSColor(red:0.941, green:0.937, blue:0.918, alpha:1)`).
+`ThemeStore.shared` (singleton `ObservableObject`, in `Models/Theme.swift`) holds `mode: .light | .dark`, persisted to `UserDefaults` under `themeMode`. Its `palette` returns a `Palette` value that bundles every named color **twice** — a SwiftUI `Color` for SwiftUI views and the matching `NSColor` for AppKit chrome — plus the `NSAppearance.Name` (`.aqua` / `.darkAqua`) and `ColorScheme` for that mode. Light is the cream/white scheme (`#F0F0EA` chrome); dark is near-pure black with a single hairline divider. There is **no longer** a hard-coded `.aqua` pin.
+
+Two propagation paths, because SwiftUI and AppKit observe differently:
+- **SwiftUI views** read `theme.palette.*` via `@EnvironmentObject var theme: ThemeStore` and re-render automatically when `mode` changes.
+- **AppKit objects** (`NSWindow`/`NSPanel` chrome, the `NSTextView`) can't observe `@Published`, so they subscribe to `Notification.Name.themeChanged`, which `mode`'s `didSet` posts. `AppDelegate.applyTheme()` repaints both windows' background + appearance; `RichTextEditor` re-applies the palette to its text view via `applyPalette(...)`.
+
+The Settings toggle (`SettingsView`, hosted by the `Settings { }` scene in `NoteFlowApp`) just flips `theme.isDark`.
+
+**Gotcha — theme-default foreground stripping.** Light body text is black; dark body text is ~0.91 white. Either gets baked into the RTF / typing attributes as an explicit `.foregroundColor`, so after a theme flip that color would render invisible against the new background. `NoteStore.stripThemeDefaultForegroundColors` removes only foreground colors that match a theme default (within a small tolerance), leaving user-picked colors from the Text Formatting picker intact. It runs when a shared storage is first built (`sharedTextStorage`) and across every live storage on each `themeChanged`. If you add a new default text color, add it to `NoteStore.themeDefaultColors` or it will get stranded on theme switches.
 
 The Dock icon is set in-process via `NSApp.applicationIconImage = AppLogo.processed` (in `Models/AppLogo.swift`). This is necessary because `swift run` launches a bare executable — there's no `.icns` in an `.app` bundle to pick up — so the icon is regenerated on every launch. The packaged `.app` from `make-dmg.sh` still uses a real `AppIcon.icns`.

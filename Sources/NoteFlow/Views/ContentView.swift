@@ -52,6 +52,7 @@ struct ContentView: View {
                                 .padding(.top, 12)
                                 .padding(.trailing, 16)
                                 .padding(.bottom, windowState.formattingVisible ? 0 : 16)
+                                .transition(.opacity)
 
                             // Formatting toolbar
                             if windowState.formattingVisible {
@@ -60,15 +61,17 @@ struct ContentView: View {
                                         RoundedRectangle(cornerRadius: 12)
                                     )
                                     .padding(.horizontal, 16)
-                                    .padding(.vertical, 10)
+                                    .padding(.vertical, 6)
                                     .transition(.move(edge: .bottom).combined(with: .opacity))
                             }
                         }
                     } else {
                         EmptyEditorPlaceholder()
+                            .transition(.opacity)
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .animation(.easeInOut(duration: 0.18), value: store.activeTabId)
             }
         }
         .background(theme.palette.chromeBackground)
