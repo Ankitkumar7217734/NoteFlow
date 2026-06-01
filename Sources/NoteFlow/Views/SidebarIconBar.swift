@@ -390,6 +390,8 @@ struct NoteListRow: View {
                       systemImage: pinned ? "pin.slash" : "pin")
             }
             Divider()
+            ExportSubmenu(noteId: noteId)
+            Divider()
             Button(role: .destructive) {
                 store.deleteNote(noteId)
             } label: {
@@ -397,6 +399,28 @@ struct NoteListRow: View {
             }
         }
         .id("\(noteId.uuidString)-\(pinned)")
+    }
+}
+
+// Reusable "Export ▸" context-menu submenu listing every export format.
+// Used by the sidebar note rows and the tab chips so a note can be exported
+// from wherever it's shown.
+struct ExportSubmenu: View {
+    @EnvironmentObject var store: NoteStore
+    let noteId: UUID
+
+    var body: some View {
+        Menu {
+            ForEach(ExportFormat.allCases) { format in
+                Button {
+                    store.exportNote(noteId, as: format)
+                } label: {
+                    Label(format.label, systemImage: format.systemImage)
+                }
+            }
+        } label: {
+            Label("Export", systemImage: "square.and.arrow.up")
+        }
     }
 }
 

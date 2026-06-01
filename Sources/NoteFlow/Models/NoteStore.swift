@@ -255,6 +255,24 @@ class NoteStore: ObservableObject {
         save()
     }
 
+    /// The note's current rich-text content. Prefers the live shared
+    /// NSTextStorage (always up to date with the latest keystrokes, even
+    /// ones not yet re-encoded to RTF) and falls back to decoding the
+    /// persisted RTF. Used by the exporter so files match what's on screen.
+    func attributedContent(for id: UUID) -> NSAttributedString {
+        if let storage = sharedStorages[id] {
+            return NSAttributedString(attributedString: storage)
+        }
+        return notes.first(where: { $0.id == id })?.attributedContent ?? NSAttributedString()
+    }
+
+    /// Export a note to a file the user picks, in the given format,
+    /// preserving its formatting.
+    func exportNote(_ id: UUID, as format: ExportFormat) {
+        guard let note = notes.first(where: { $0.id == id }) else { return }
+        NoteExporter.export(note: note, content: attributedContent(for: id), format: format)
+    }
+
     func togglePin(_ id: UUID) {
         guard let idx = notes.firstIndex(where: { $0.id == id }) else { return }
         withAnimation(.easeInOut(duration: 0.22)) {

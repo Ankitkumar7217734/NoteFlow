@@ -84,6 +84,17 @@ Registered via Carbon `RegisterEventHotKey` (not `NSEvent.addGlobalMonitorForEve
 
 `LinkTitleFetcher` (in `Models/`) is an `async` helper that downloads a URL and extracts a human-readable title (prefers `<meta property="og:title">`, falls back to `<title>`). It sends a Safari-like `User-Agent` (YouTube/Twitter/etc. return very different HTML otherwise), supports basic HTML-entity decoding, and caches results in-process. Used when the user pastes a URL into the editor.
 
+### Export
+
+`NoteExporter` (in `Models/`) writes a note to **PDF, Word (.docx), Markdown, or plain text**, preserving the editor's formatting. It's reached from the **Export ▸** submenu in the sidebar note-row and tab-chip context menus, which call `NoteStore.exportNote(_:as:)`. The store hands the exporter the note's *live* content via `attributedContent(for:)` — it prefers the shared `NSTextStorage` over the persisted RTF so the export matches on-screen edits even before they're debounce-saved.
+
+- **Plain text** — `attributedString.string`.
+- **Word** — `NSAttributedString.data(from:documentAttributes:)` with `.officeOpenXML`, which produces a real `.docx`.
+- **Markdown** — a hand-written serializer (`markdown(from:)`) that walks the string line by line: it maps the editor's list prefixes (`• ` → `- `, `1. ` kept verbatim, `☐ ` → `- [ ] `) and wraps each styled run in Markdown emphasis (bold `**`, italic `*`, both `***`, inline-code for fixed-pitch fonts, links `[text](url)`, underline via `<u>`). Surrounding whitespace is moved outside the markers so emphasis renders.
+- **PDF** — lays the text out across US-Letter pages with an `NSLayoutManager` (one `NSTextContainer` per page, added until every glyph is placed) and draws each page into a `CGContext` PDF. The page context is created `flipped: true` *and* the CTM is flipped to a top-left origin — both are required or glyphs render upside-down. Theme-default foreground colors are stripped first (via `NoteStore.stripThemeDefaultForegroundColors`) so dark-theme notes don't draw light text on the white page; user-picked colors survive.
+
+`ExportFormat` (same file) is the shared enum of formats, carrying each one's menu label, SF Symbol, file extension, and `UTType` for the save panel. The save panel is shown by `NoteExporter.export(...)`, which calls `NSApp.activate(...)` first so the sheet is front-most even when triggered from the non-activating floating panel.
+
 ### Settings
 
 `HotkeyStore.shared` stores `keyCode: UInt32` and `carbonModifiers: UInt32` (Carbon modifier flags — `controlKey`, `optionKey`, `shiftKey`, `cmdKey` — **not** `NSEvent.ModifierFlags`; they differ). `SettingsView` contains `ShortcutRecorderButton`, which installs a temporary local event monitor to capture the next key combo and posts `Notification.Name.hotkeyChanged`.

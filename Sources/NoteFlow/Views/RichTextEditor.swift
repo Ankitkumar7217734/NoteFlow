@@ -3,7 +3,7 @@ import AppKit
 
 // Editor's canonical font — used everywhere we need to normalize incoming text.
 enum EditorTypography {
-    static let baseFontSize: CGFloat = 15
+    static let baseFontSize: CGFloat = 14
     static var baseFont: NSFont { .systemFont(ofSize: baseFontSize) }
 }
 

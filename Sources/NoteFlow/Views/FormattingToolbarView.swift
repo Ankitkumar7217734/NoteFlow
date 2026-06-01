@@ -8,6 +8,8 @@ struct FormattingToolbarView: View {
     @State private var savedRange = NSRange(location: 0, length: 0)
     @State private var showTablePopover = false
     @State private var showColorPopover = false
+    @State private var showFontSizePopover = false
+    @State private var fontSizeValue: CGFloat = EditorTypography.baseFontSize
 
     var body: some View {
         HStack(spacing: 2) {
@@ -26,6 +28,30 @@ struct FormattingToolbarView: View {
             // Code
             FormatButton(label: "<>", mono: true, tooltip: "Inline Code") {
                 applyCodeStyle()
+            }
+
+            ToolbarDivider()
+
+            // Font size: a popover with −/+ steppers and preset sizes.
+            // Capture the editor's text view + selection before the popover
+            // steals focus (same pattern as link/table/color).
+            Button {
+                if let tv = activeTextView() {
+                    savedTextView = tv
+                    savedRange = tv.selectedRange()
+                }
+                fontSizeValue = currentFontSize()
+                showFontSizePopover = true
+            } label: {
+                Image(systemName: "textformat.size")
+                    .font(.system(size: 14))
+                    .foregroundColor(.primary)
+                    .frame(width: 32, height: 28)
+            }
+            .buttonStyle(.plain)
+            .help("Font Size")
+            .popover(isPresented: $showFontSizePopover, arrowEdge: .bottom) {
+                fontSizePopover
             }
 
             ToolbarDivider()
@@ -215,6 +241,123 @@ struct FormattingToolbarView: View {
         tv.didChangeText()
         // Restore the selection so the user can see what they recolored.
         tv.setSelectedRange(range)
+    }
+
+    // MARK: – Font size
+
+    // Preset sizes shown as quick-pick chips in the font-size popover.
+    private static let fontSizePresets: [CGFloat] = [10, 12, 14, 18, 24, 36]
+
+    // Popover with a −/+ fine adjuster (current size in the middle) and a
+    // row of preset sizes. Mirrors the color popover's layout.
+    private var fontSizePopover: some View {
+        VStack(spacing: 12) {
+            HStack(spacing: 14) {
+                Button { adjustFontSize(-1) } label: {
+                    Image(systemName: "minus")
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundColor(.primary)
+                        .frame(width: 26, height: 26)
+                        .background(RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(0.08)))
+                }
+                .buttonStyle(.plain)
+
+                Text("\(Int(fontSizeValue.rounded()))")
+                    .font(.system(size: 15, weight: .semibold))
+                    .monospacedDigit()
+                    .frame(minWidth: 32)
+
+                Button { adjustFontSize(1) } label: {
+                    Image(systemName: "plus")
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundColor(.primary)
+                        .frame(width: 26, height: 26)
+                        .background(RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(0.08)))
+                }
+                .buttonStyle(.plain)
+            }
+
+            Divider()
+
+            HStack(spacing: 6) {
+                ForEach(Self.fontSizePresets, id: \.self) { size in
+                    let isCurrent = Int(size) == Int(fontSizeValue.rounded())
+                    Button {
+                        chooseFontSize(size)
+                    } label: {
+                        Text("\(Int(size))")
+                            .font(.system(size: 12, weight: isCurrent ? .bold : .regular))
+                            .foregroundColor(.primary)
+                            .frame(width: 30, height: 26)
+                            .background(
+                                RoundedRectangle(cornerRadius: 6)
+                                    .fill(Color.primary.opacity(isCurrent ? 0.18 : 0.08))
+                            )
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+        .padding(14)
+    }
+
+    /// Current point size at the captured selection (or the typing
+    /// attributes when nothing is selected), so the popover opens showing
+    /// the right number.
+    private func currentFontSize() -> CGFloat {
+        guard let tv = savedTextView ?? activeTextView() else { return EditorTypography.baseFontSize }
+        let range = (savedTextView != nil) ? savedRange : tv.selectedRange()
+        if range.length == 0 {
+            let font = (tv.typingAttributes[.font] as? NSFont) ?? tv.font ?? EditorTypography.baseFont
+            return font.pointSize
+        }
+        if let storage = tv.textStorage, range.location < storage.length,
+           let font = storage.attribute(.font, at: range.location, effectiveRange: nil) as? NSFont {
+            return font.pointSize
+        }
+        return EditorTypography.baseFontSize
+    }
+
+    /// Resize the captured selection to `size`, preserving each run's family
+    /// and traits (bold / italic / mono) via NSFontManager.convert(_:toSize:).
+    /// With no selection, updates typing attributes so the next typed run
+    /// picks up the size. Doesn't steal first responder, so the popover stays
+    /// open across repeated −/+ taps.
+    private func applyFontSize(_ size: CGFloat) {
+        guard let tv = savedTextView ?? activeTextView() else { return }
+        let range = (savedTextView != nil) ? savedRange : tv.selectedRange()
+        let fm = NSFontManager.shared
+
+        if range.length == 0 {
+            var typing = tv.typingAttributes
+            let current = (typing[.font] as? NSFont) ?? tv.font ?? EditorTypography.baseFont
+            typing[.font] = fm.convert(current, toSize: size)
+            tv.typingAttributes = typing
+            return
+        }
+
+        guard let storage = tv.textStorage,
+              tv.shouldChangeText(in: range, replacementString: nil) else { return }
+        storage.beginEditing()
+        storage.enumerateAttribute(.font, in: range, options: []) { value, subRange, _ in
+            let font = (value as? NSFont) ?? EditorTypography.baseFont
+            storage.addAttribute(.font, value: fm.convert(font, toSize: size), range: subRange)
+        }
+        storage.endEditing()
+        tv.didChangeText()
+    }
+
+    private func adjustFontSize(_ delta: CGFloat) {
+        let newSize = min(200, max(6, fontSizeValue + delta))
+        fontSizeValue = newSize
+        applyFontSize(newSize)
+    }
+
+    private func chooseFontSize(_ size: CGFloat) {
+        fontSizeValue = size
+        applyFontSize(size)
+        savedTextView = nil
+        showFontSizePopover = false
     }
 
     // MARK: – Lookup helpers

@@ -178,6 +178,15 @@ struct TabChip: View {
                 store.activeTabId = note.id
             }
         }
+        .contextMenu {
+            ExportSubmenu(noteId: note.id)
+            Divider()
+            Button {
+                store.closeTab(note.id)
+            } label: {
+                Label("Close Tab", systemImage: "xmark")
+            }
+        }
     }
 
     private func commitTitle() {
