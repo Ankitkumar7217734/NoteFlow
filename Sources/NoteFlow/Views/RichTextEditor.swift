@@ -540,6 +540,16 @@ final class NoteTextView: NSTextView {
         // in — otherwise pasted text stays e.g. black after a dark-mode flip.
         result.removeAttribute(.foregroundColor, range: full)
 
+        // Reset foreign paragraph styles (head/first-line indents, custom tab
+        // stops, alignment) so pasted lines align to a single left margin
+        // instead of each starting at a different horizontal position.
+        NoteStore.normalizeParagraphStyles(in: result)
+
+        // Collapse doubled interior spaces (common in PDF / Word pastes) that
+        // otherwise leave a stray leading space when a paragraph soft-wraps,
+        // making consecutive lines look unaligned.
+        NoteStore.normalizeWhitespace(in: result)
+
         // Rewrite fonts: preserve bold/italic/mono, normalize family + size.
         result.enumerateAttribute(.font, in: full) { value, range, _ in
             let oldFont = value as? NSFont

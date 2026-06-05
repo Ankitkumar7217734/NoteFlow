@@ -49,6 +49,13 @@ class NoteStore: ObservableObject {
                 // preserved.
                 let mutable = NSMutableAttributedString(attributedString: attr)
                 Self.stripThemeDefaultForegroundColors(in: mutable)
+                // Reset foreign paragraph indents/alignment baked in by old
+                // pastes so existing notes render with one straight left
+                // margin. Tables (textBlocks) are preserved.
+                Self.normalizeParagraphStyles(in: mutable)
+                // Collapse doubled interior spaces that make soft-wrapped
+                // lines start at uneven positions.
+                Self.normalizeWhitespace(in: mutable)
                 storage.setAttributedString(mutable)
             }
         }
@@ -87,6 +94,56 @@ class NoteStore: ObservableObject {
         }
         for range in rangesToClear {
             storage.removeAttribute(.foregroundColor, range: range)
+        }
+    }
+
+    /// Reset every paragraph to a clean, left-aligned style so consecutive
+    /// lines share one left margin. Foreign content (pasted from the web,
+    /// Word, etc.) carries first-line / head indents, custom tab stops, and
+    /// alignment that make each line start at a different horizontal
+    /// position — this strips all of that down to the editor's default.
+    /// Table-cell membership (`textBlocks`) is preserved so tables keep
+    /// their layout; the app's own lists are plain-text prefixes, so nothing
+    /// else here depends on paragraph indentation.
+    static func normalizeParagraphStyles(in storage: NSMutableAttributedString) {
+        guard storage.length > 0 else { return }
+        let full = NSRange(location: 0, length: storage.length)
+        var replacements: [(NSRange, NSParagraphStyle)] = []
+        storage.enumerateAttribute(.paragraphStyle, in: full, options: []) { value, range, _ in
+            let clean = NSMutableParagraphStyle()
+            clean.alignment = .natural
+            // Keep table cells intact; drop everything else (indents, tab
+            // stops, list markers, spacing) back to the default.
+            if let original = value as? NSParagraphStyle, !original.textBlocks.isEmpty {
+                clean.textBlocks = original.textBlocks
+            }
+            replacements.append((range, clean))
+        }
+        for (range, style) in replacements {
+            storage.addAttribute(.paragraphStyle, value: style, range: range)
+        }
+    }
+
+    /// Clean up whitespace that makes wrapped lines look misaligned. Pasted
+    /// content (especially from PDFs / formatted docs) often has doubled
+    /// interior spaces; when a paragraph soft-wraps, the wrap can leave a
+    /// stray space at the start of the next visual line, so consecutive
+    /// lines appear to start at slightly different positions. We collapse
+    /// runs of 2+ spaces that follow a non-space character down to one, and
+    /// fold non-breaking / exotic spaces into a regular space. Leading-line
+    /// whitespace (the app's blockquote indent, intentional indentation) is
+    /// left untouched, since those runs aren't preceded by a visible char.
+    static func normalizeWhitespace(in storage: NSMutableAttributedString) {
+        guard storage.length > 0 else { return }
+        let ms = storage.mutableString
+        for exotic in ["\u{00A0}", "\u{2007}", "\u{202F}", "\u{2009}", "\u{2002}", "\u{2003}"] {
+            ms.replaceOccurrences(of: exotic, with: " ", options: [],
+                                  range: NSRange(location: 0, length: ms.length))
+        }
+        if let regex = try? NSRegularExpression(pattern: "(\\S) {2,}") {
+            regex.replaceMatches(in: ms, options: [],
+                                 range: NSRange(location: 0, length: ms.length),
+                                 withTemplate: "$1 ")
         }
     }
 
