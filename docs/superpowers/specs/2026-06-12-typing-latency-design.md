@@ -24,8 +24,18 @@ save fires. Latency only — no visual/typography changes.
   (preserves the clipping fix), then redraw. Text below the viewport is laid out
   lazily by AppKit idle-time background layout, as in any large NSTextView document.
   `paste()` keeps its existing full-layout pass (rare event, self-contained).
-  - *Rejected:* `allowsNonContiguousLayout` (known AppKit glitches with
-    NSTextTable — NoteFlow ships tables — and custom layout managers).
+  - **Revision (found during implementation):** bounded `ensureLayout` alone was
+    not sufficient. A vertically-resizable `NSTextView` re-sizes itself to fit its
+    content on every edit, and computing that height under contiguous layout forces
+    a full-document layout regardless — measured in-test: one keystroke laid out
+    all 225,001 characters. The fix that works is `allowsNonContiguousLayout = true`
+    (height *estimation*), now the `NoteLayoutManager` default — measured: 2,791 of
+    225,001 characters per keystroke, and 0 at document-open. To keep the original
+    "zero new risk to tables" property that motivated rejecting it, **any note
+    containing an NSTextTable runs in contiguous mode** (exactly today's behavior),
+    enforced at all three entry points: note open (`makeNSView`), paste of table
+    content, and toolbar table insert. The bounded `didChangeText` passes are kept —
+    they guarantee on-screen consistency under the lazier layout mode.
   - *Rejected:* TextKit 2 migration (no NSTextTable support; full editor rewrite).
 - **Background RTF encode for the debounce path.** The debounce timer calls a new
   `flushPendingSavesInBackground()`: snapshot dirty storages on main (cheap
