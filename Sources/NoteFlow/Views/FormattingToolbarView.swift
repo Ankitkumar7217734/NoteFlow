@@ -592,6 +592,11 @@ struct FormattingToolbarView: View {
             .paragraphStyle: NSParagraphStyle.default
         ]))
 
+        // The note is gaining a table: drop every attached layout manager
+        // back to contiguous mode first — tables glitch under the editor's
+        // default non-contiguous (fast-typing) layout.
+        NoteTextView.disableNonContiguousLayout(for: storage)
+
         guard tv.shouldChangeText(in: range, replacementString: attr.string) else { return }
         storage.replaceCharacters(in: range, with: attr)
         tv.didChangeText()

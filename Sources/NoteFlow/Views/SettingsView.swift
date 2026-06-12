@@ -3,6 +3,7 @@ import Carbon
 
 struct SettingsView: View {
     @EnvironmentObject var theme: ThemeStore
+    @ObservedObject private var panelSettings = PanelSettings.shared
 
     var body: some View {
         Form {
@@ -37,10 +38,34 @@ struct SettingsView: View {
                     ShortcutRecorderButton()
                 }
                 .padding(.vertical, 4)
+
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Opacity")
+                        Text("Transparency of the floating panel.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Slider(
+                        value: Binding(
+                            get: { panelSettings.opacity },
+                            set: { panelSettings.opacity = $0 }
+                        ),
+                        in: PanelSettings.minOpacity...1.0
+                    )
+                    .frame(width: 140)
+                    Text("\(Int((panelSettings.opacity * 100).rounded()))%")
+                        .font(.system(size: 12))
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                        .frame(width: 40, alignment: .trailing)
+                }
+                .padding(.vertical, 4)
             }
         }
         .formStyle(.grouped)
-        .frame(width: 460, height: 240)
+        .frame(width: 460, height: 300)
     }
 }
 
@@ -81,13 +106,10 @@ struct ShortcutRecorderButton: View {
                 return nil
             }
             let ns = event.modifierFlags.intersection([.command, .option, .shift, .control])
-            guard !ns.isEmpty else { return nil }
-
-            var mods: UInt32 = 0
-            if ns.contains(.control) { mods |= UInt32(controlKey) }
-            if ns.contains(.option)  { mods |= UInt32(optionKey) }
-            if ns.contains(.shift)   { mods |= UInt32(shiftKey) }
-            if ns.contains(.command) { mods |= UInt32(cmdKey) }
+            // Reject combos without a real modifier (⌃ ⌥ ⌘) — registering
+            // e.g. shift-only ⇧S globally would swallow every capital S
+            // typed in any app. Keep recording until a valid combo arrives.
+            guard let mods = HotkeyStore.carbonModifiers(from: ns) else { return nil }
 
             hotkeyStore.keyCode = UInt32(event.keyCode)
             hotkeyStore.carbonModifiers = mods

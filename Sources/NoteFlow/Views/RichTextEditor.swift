@@ -12,6 +12,23 @@ enum EditorTypography {
 // looks blocky against the dark editor background; the radius softens
 // it the way modern editors render selection.
 final class NoteLayoutManager: NSLayoutManager {
+    override init() {
+        super.init()
+        // Estimate the height of not-yet-laid-out text instead of laying out
+        // the whole document. NSTextView's fit-to-content sizing queries the
+        // used height on every edit; under the default *contiguous* mode that
+        // forces a full-document layout per keystroke, so typing slowed down
+        // as a note grew. Notes containing tables flip this back off —
+        // NSTextTable has a history of glitches under non-contiguous layout
+        // (see RichTextEditor.makeNSView / NoteTextView.disableNonContiguous).
+        allowsNonContiguousLayout = true
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        allowsNonContiguousLayout = true
+    }
+
     override func fillBackgroundRectArray(_ rectArray: UnsafePointer<NSRect>,
                                           count rectCount: Int,
                                           forCharacterRange charRange: NSRange,
@@ -307,13 +324,22 @@ final class NoteTextView: NSTextView {
     //     point is clipped until the user scrolls.
     //   • Backspace → the glyph is removed from storage but the caret keeps
     //     the old X position, leaving a "ghost" gap on the line.
-    // Forcing layout on every text change keeps what's drawn in sync with
-    // what's in the storage. ensureLayout is incremental, so for unchanged
-    // regions it costs nothing.
+    // Both glitches only concern what's on screen, so force layout for just
+    // the caret's line and the visible viewport — O(screen) per keystroke.
+    // (ensureLayout(for: textContainer) here cost O(note length) per
+    // keystroke, so typing got slower as a note grew.) Text below the
+    // viewport is laid out lazily by AppKit's idle-time background layout,
+    // and paste() runs its own full-layout pass for the rare big insert.
     override func didChangeText() {
         super.didChangeText()
-        if let lm = layoutManager, let tc = textContainer {
-            lm.ensureLayout(for: tc)
+        guard let lm = layoutManager, let tc = textContainer else { return }
+        let ns = string as NSString
+        let caret = min(selectedRange().location, ns.length)
+        lm.ensureLayout(forCharacterRange: ns.lineRange(for: NSRange(location: caret, length: 0)))
+        let visibleInContainer = visibleRect.offsetBy(dx: -textContainerOrigin.x,
+                                                      dy: -textContainerOrigin.y)
+        if !visibleInContainer.isEmpty {
+            _ = lm.glyphRange(forBoundingRect: visibleInContainer, in: tc)
         }
         needsDisplay = true
     }
@@ -399,6 +425,12 @@ final class NoteTextView: NSTextView {
 
         let cleaned = Self.sanitize(src)
         let linked = Self.autoLink(cleaned)
+        // Pasting a table into a previously table-free note: drop back to
+        // contiguous layout before the insert so the table never renders
+        // under non-contiguous mode.
+        if Self.containsTables(linked) {
+            Self.disableNonContiguousLayout(for: textStorage)
+        }
         let range = selectedRange()
         guard shouldChangeText(in: range, replacementString: linked.string) else { return }
         textStorage?.replaceCharacters(in: range, with: linked)
@@ -522,6 +554,30 @@ final class NoteTextView: NSTextView {
         return result
     }
 
+    // MARK: – Table-aware layout mode
+
+    /// True when any paragraph in `text` belongs to an NSTextTable cell.
+    static func containsTables(_ text: NSAttributedString) -> Bool {
+        guard text.length > 0 else { return false }
+        var found = false
+        text.enumerateAttribute(.paragraphStyle,
+                                in: NSRange(location: 0, length: text.length),
+                                options: []) { value, _, stop in
+            if let style = value as? NSParagraphStyle, !style.textBlocks.isEmpty {
+                found = true
+                stop.pointee = true
+            }
+        }
+        return found
+    }
+
+    /// Tables glitch under non-contiguous layout, so once a note contains
+    /// one, flip every attached layout manager (main window + floating
+    /// panel) back to contiguous mode — the pre-optimization behavior.
+    static func disableNonContiguousLayout(for storage: NSTextStorage?) {
+        storage?.layoutManagers.forEach { $0.allowsNonContiguousLayout = false }
+    }
+
     static func sanitize(_ source: NSAttributedString) -> NSAttributedString {
         let result = NSMutableAttributedString(attributedString: source)
         let full = NSRange(location: 0, length: result.length)
@@ -583,12 +639,21 @@ final class NoteTextView: NSTextView {
 // instantly reflects in the other.
 struct RichTextEditor: NSViewRepresentable {
     let noteId: UUID
+    /// Floating panel: smaller text insets so the 520pt-wide panel spends
+    /// its width on text instead of margins.
+    var compact: Bool = false
     var onTextChange: () -> Void
 
     func makeNSView(context: Context) -> NSScrollView {
         // Build the text system bottom-up so we can plug in the shared storage.
         let storage = NoteStore.shared.sharedTextStorage(for: noteId)
         let layoutManager = NoteLayoutManager()
+        // NoteLayoutManager defaults to non-contiguous (viewport-bounded)
+        // layout for fast typing; notes that already contain tables keep
+        // contiguous mode, where NSTextTable rendering is reliable.
+        if NoteTextView.containsTables(storage) {
+            layoutManager.allowsNonContiguousLayout = false
+        }
         storage.addLayoutManager(layoutManager)
         let textContainer = NSTextContainer(size: NSSize(
             width: 0, height: CGFloat.greatestFiniteMagnitude
@@ -605,21 +670,22 @@ struct RichTextEditor: NSViewRepresentable {
         textView.isAutomaticTextReplacementEnabled = true
         textView.isAutomaticLinkDetectionEnabled = true
         textView.isAutomaticDataDetectionEnabled = true
-        textView.textContainerInset = NSSize(width: 28, height: 28)
+        let inset: CGFloat = compact ? 14 : 28
+        textView.textContainerInset = NSSize(width: inset, height: inset)
         // IMPORTANT: don't set textView.font here — it would wipe per-run
         // fonts (bold/italic/mono) on the existing storage.
         //
-        // Use NSColor.textColor (the system semantic) for both the text
-        // view's default color and for typingAttributes. The dynamic
-        // color resolves to black/white based on the text view's
-        // appearance, so on theme switch — when only appearance changes
-        // and we don't touch textColor again — default text re-renders
-        // in the new theme color without overwriting user-applied
-        // colors anywhere in the storage.
-        textView.textColor = NSColor.textColor
+        // Use Palette.dynamicInkNS (a named dynamic color, same mechanism
+        // as NSColor.textColor) for both the text view's default color and
+        // for typingAttributes. It resolves to the theme's warm ink based
+        // on the text view's appearance, so on theme switch — when only
+        // appearance changes and we don't touch textColor again — default
+        // text re-renders in the new theme's ink without overwriting
+        // user-applied colors anywhere in the storage.
+        textView.textColor = Palette.dynamicInkNS
         textView.typingAttributes = [
             .font: EditorTypography.baseFont,
-            .foregroundColor: NSColor.textColor
+            .foregroundColor: Palette.dynamicInkNS
         ]
         textView.isEditable = true
         textView.isSelectable = true
@@ -753,6 +819,8 @@ struct NoteEditorView: View {
     @EnvironmentObject var store: NoteStore
     @EnvironmentObject var theme: ThemeStore
     let note: Note
+    /// True in the floating panel: tighter text insets (see RichTextEditor).
+    var compact: Bool = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -763,7 +831,7 @@ struct NoteEditorView: View {
                 .frame(height: 1)
 
             ZStack(alignment: .bottomTrailing) {
-                RichTextEditor(noteId: note.id) {
+                RichTextEditor(noteId: note.id, compact: compact) {
                     // The shared NSTextStorage is the live source of truth;
                     // NoteStore debounces the RTF-encode + disk write so typing
                     // never blocks on serialization (see noteBodyDidChange).

@@ -8,6 +8,32 @@ import Carbon
 final class FloatingPanel: NSPanel {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
+
+    /// Every load-bearing flag in one testable place (pinned by
+    /// PanelTests.floatingPanelKeepsItsLoadBearingConfiguration):
+    /// .nonactivatingPanel + the overrides above keep the panel typeable
+    /// without activating NoteFlow (no Space switch); .screenSaver level +
+    /// the collection behavior let it overlay full-screen apps on any Space.
+    convenience init(contentSize: NSSize) {
+        self.init(
+            contentRect: NSRect(origin: .zero, size: contentSize),
+            styleMask: [.nonactivatingPanel, .resizable, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
+        isMovableByWindowBackground = true
+        backgroundColor = .clear
+        isOpaque = false
+        hasShadow = true
+        // isFloatingPanel must be set BEFORE level: setting it resets the
+        // window level to .floating(3), which silently undid .screenSaver
+        // in the original code (caught by the pin test).
+        isFloatingPanel = true
+        level = .screenSaver
+        collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        hidesOnDeactivate = false
+        worksWhenModal = true
+    }
 }
 
 class AppDelegate: NSObject, NSApplicationDelegate {
@@ -17,8 +43,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var globalHotKeyRef: EventHotKeyRef? // fixed ⌃⇧D
     // Track the app that was active before the floating panel opened so we can restore it.
     private var previousApp: NSRunningApplication?
-
-    private let floatingSize = NSSize(width: 520, height: 535)
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
@@ -50,9 +74,44 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         registerGlobalHotkey()
 
         NotificationCenter.default.addObserver(
+            self, selector: #selector(prepareThemeCrossFade),
+            name: .themeWillChange, object: nil
+        )
+        NotificationCenter.default.addObserver(
             self, selector: #selector(applyTheme),
             name: .themeChanged, object: nil
         )
+    }
+
+    // MARK: – Theme cross-fade
+
+    private static let themeFadeOverlayID = NSUserInterfaceItemIdentifier("themeFadeOverlay")
+
+    /// themeWillChange fires before the mode mutates: snapshot every visible
+    /// window's content while it still shows the outgoing theme and pin the
+    /// snapshot on top. applyTheme() then repaints underneath and fades the
+    /// snapshot out, so SwiftUI views, the NSTextView and the window chrome
+    /// all transition as one image instead of hard-cutting in random order.
+    @objc private func prepareThemeCrossFade() {
+        for win in NSApp.windows where win.isVisible {
+            guard let content = win.contentView, content.bounds.width > 0 else { continue }
+            // A rapid double-toggle can race a fade still in flight.
+            content.subviews
+                .filter { $0.identifier == Self.themeFadeOverlayID }
+                .forEach { $0.removeFromSuperview() }
+
+            guard let rep = content.bitmapImageRepForCachingDisplay(in: content.bounds) else { continue }
+            content.cacheDisplay(in: content.bounds, to: rep)
+            let image = NSImage(size: content.bounds.size)
+            image.addRepresentation(rep)
+
+            let overlay = NSImageView(frame: content.bounds)
+            overlay.image = image
+            overlay.imageScaling = .scaleAxesIndependently
+            overlay.autoresizingMask = [.width, .height]
+            overlay.identifier = Self.themeFadeOverlayID
+            content.addSubview(overlay, positioned: .above, relativeTo: nil)
+        }
     }
 
     @objc private func applyTheme() {
@@ -62,6 +121,20 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         window.appearance = appearance
         window.contentView?.appearance = appearance
         floatingPanel?.contentView?.appearance = appearance
+
+        // Fade out the pre-flip snapshots installed by prepareThemeCrossFade.
+        for win in NSApp.windows {
+            guard let content = win.contentView else { continue }
+            for overlay in content.subviews where overlay.identifier == Self.themeFadeOverlayID {
+                NSAnimationContext.runAnimationGroup({ ctx in
+                    ctx.duration = 0.28
+                    ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                    overlay.animator().alphaValue = 0
+                }, completionHandler: { [weak overlay] in
+                    overlay?.removeFromSuperview()
+                })
+            }
+        }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
@@ -87,29 +160,23 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: – Floating panel
 
     private func setupFloatingPanel() {
-        // .nonactivatingPanel lets the panel become key WITHOUT activating
-        // NoteFlow, so triggering the hotkey from another app's full-screen
-        // Space doesn't cause a Space switch back to NoteFlow's main window.
-        // Our FloatingPanel subclass overrides canBecomeKey so the text view
-        // still receives keystrokes despite the non-activating style.
-        floatingPanel = FloatingPanel(
-            contentRect: NSRect(origin: .zero, size: floatingSize),
-            styleMask: [.nonactivatingPanel, .resizable, .fullSizeContentView],
-            backing: .buffered,
-            defer: false
-        )
-        floatingPanel.isMovableByWindowBackground = true
-        floatingPanel.backgroundColor = .clear
-        floatingPanel.isOpaque = false
-        floatingPanel.hasShadow = true
+        // All panel configuration lives in FloatingPanel(contentSize:) so
+        // the load-bearing flags are covered by tests. Size is the user's
+        // last (persisted) panel size.
+        floatingPanel = FloatingPanel(contentSize: PanelSettings.shared.panelSize)
         let palette = ThemeStore.shared.palette
         floatingPanel.appearance = NSAppearance(named: palette.appearance)
-        // screenSaver level keeps it above full-screen apps.
-        floatingPanel.level = .screenSaver
-        floatingPanel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        floatingPanel.isFloatingPanel = true
-        floatingPanel.hidesOnDeactivate = false
-        floatingPanel.worksWhenModal = true
+
+        // Remember the size the user drags the panel to.
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(panelDidEndResize),
+            name: NSWindow.didEndLiveResizeNotification, object: floatingPanel
+        )
+        // Apply opacity changes live while the Settings slider is dragged.
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(applyPanelOpacity),
+            name: .panelOpacityChanged, object: nil
+        )
 
         let panelContent = ContentView(isFloatingPanel: true)
             .environmentObject(NoteStore.shared)
@@ -135,16 +202,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             // Remember the current frontmost app before we take over.
             previousApp = NSWorkspace.shared.frontmostApplication
 
+            // Last user-chosen size, re-centered on the current screen.
+            let panelSize = PanelSettings.shared.panelSize
             let screen = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
             let origin = NSPoint(
-                x: screen.midX - floatingSize.width / 2,
-                y: screen.midY - floatingSize.height / 2
+                x: screen.midX - panelSize.width / 2,
+                y: screen.midY - panelSize.height / 2
             )
             // Entrance animation: start a touch lower and fully transparent,
             // then rise + fade into place. Driven by the panel's animator via
             // NSAnimationContext so we never call NSApp.activate (which would
             // yank the user off their current Space — see the note below).
-            let finalFrame = NSRect(origin: origin, size: floatingSize)
+            let finalFrame = NSRect(origin: origin, size: panelSize)
             floatingPanel.alphaValue = 0
             floatingPanel.setFrame(finalFrame.offsetBy(dx: 0, dy: -12), display: false)
             // DO NOT call NSApp.activate(...) here — that would pull the user
@@ -156,7 +225,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             floatingPanel.makeKeyAndOrderFront(nil)
             NSAnimationContext.runAnimationGroup { ctx in
                 ctx.duration = 0.18
-                floatingPanel.animator().alphaValue = 1
+                // Land on the user's chosen opacity, not hard-coded 1.
+                floatingPanel.animator().alphaValue = PanelSettings.shared.opacity
                 floatingPanel.animator().setFrame(finalFrame, display: true)
             }
 
@@ -168,6 +238,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
         }
+    }
+
+    @objc private func panelDidEndResize() {
+        PanelSettings.shared.panelSize = floatingPanel.frame.size
+    }
+
+    @objc private func applyPanelOpacity() {
+        guard floatingPanel.isVisible else { return }
+        floatingPanel.alphaValue = PanelSettings.shared.opacity
     }
 
     func expandToFull() {

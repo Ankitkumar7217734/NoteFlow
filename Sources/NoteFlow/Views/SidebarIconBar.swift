@@ -11,6 +11,10 @@ struct SidebarIconBar: View {
     @EnvironmentObject var theme: ThemeStore
     @Environment(\.openSettings) private var openSettings
     @FocusState private var searchFocused: Bool
+    // Permanent deletion is irreversible, so both paths (Empty Trash and a
+    // single note's Delete Forever) confirm before acting.
+    @State private var confirmEmptyTrash = false
+    @State private var pendingPermanentDeleteId: UUID?
 
     private var isExpanded: Bool { windowState.sidebarOpen }
 
@@ -216,12 +220,24 @@ struct SidebarIconBar: View {
                 Spacer()
                 if !trashed.isEmpty {
                     Button("Empty") {
-                        store.emptyTrash()
+                        confirmEmptyTrash = true
                     }
                     .buttonStyle(.plain)
                     .font(.system(size: 11, weight: .medium))
                     .foregroundColor(theme.palette.secondaryText)
                     .help("Permanently delete all trashed notes")
+                    .confirmationDialog(
+                        trashed.count == 1
+                            ? "Permanently delete 1 note?"
+                            : "Permanently delete \(trashed.count) notes?",
+                        isPresented: $confirmEmptyTrash
+                    ) {
+                        Button("Empty Trash", role: .destructive) {
+                            store.emptyTrash()
+                        }
+                    } message: {
+                        Text("This can't be undone.")
+                    }
                 }
             }
             .padding(.horizontal, 4)
@@ -252,7 +268,7 @@ struct SidebarIconBar: View {
                                         Label("Restore", systemImage: "arrow.uturn.backward")
                                     }
                                     Button(role: .destructive) {
-                                        store.permanentlyDeleteNote(note.id)
+                                        pendingPermanentDeleteId = note.id
                                     } label: {
                                         Label("Delete Forever", systemImage: "trash.fill")
                                     }
@@ -261,6 +277,22 @@ struct SidebarIconBar: View {
                     }
                 }
                 .frame(maxHeight: .infinity)
+                .confirmationDialog(
+                    "Delete this note forever?",
+                    isPresented: Binding(
+                        get: { pendingPermanentDeleteId != nil },
+                        set: { if !$0 { pendingPermanentDeleteId = nil } }
+                    )
+                ) {
+                    Button("Delete Forever", role: .destructive) {
+                        if let id = pendingPermanentDeleteId {
+                            store.permanentlyDeleteNote(id)
+                        }
+                        pendingPermanentDeleteId = nil
+                    }
+                } message: {
+                    Text("This can't be undone.")
+                }
             }
         }
     }

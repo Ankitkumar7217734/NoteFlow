@@ -7,6 +7,11 @@ enum ThemeMode: String {
 
 extension Notification.Name {
     static let themeChanged = Notification.Name("themeChanged")
+    /// Posted just BEFORE the mode flips, so AppDelegate can snapshot the
+    /// windows for the cross-fade while they still show the old theme.
+    /// (Observer order on themeChanged isn't guaranteed, so the snapshot
+    /// needs its own, earlier signal.)
+    static let themeWillChange = Notification.Name("themeWillChange")
 }
 
 // Palette of named colors for one theme mode. Exposes both SwiftUI Color
@@ -38,57 +43,76 @@ struct Palette {
     let appearance: NSAppearance.Name
     let colorScheme: ColorScheme
 
+    // MARK: – Paper & Ink default text colors
+
+    // The editor's default "ink" per theme. Concrete values are needed in
+    // NoteStore.themeDefaultColors (strip-on-load matching), the dynamic
+    // color below resolves between them per appearance.
+    static let lightInkNS = NSColor(red: 0.173, green: 0.165, blue: 0.149, alpha: 1)  // #2C2A26
+    static let darkInkNS  = NSColor(red: 0.855, green: 0.843, blue: 0.820, alpha: 1)  // #DAD7D1
+
+    /// The editor's default text color. Behaves like NSColor.textColor —
+    /// resolves per the view's effective appearance — but to NoteFlow's
+    /// warm inks instead of pure black / near-white, keeping long-form
+    /// contrast in the comfortable 9–16:1 band.
+    static let dynamicInkNS = NSColor(name: nil) { appearance in
+        appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? darkInkNS : lightInkNS
+    }
+
+    // Light — "paper": cream chrome (the app's identity), paper-tinted
+    // editor (not stark white), warm near-black ink. Body contrast ≈ 13.8:1.
     static let light = Palette(
         chromeBackground: Color(red: 0.941, green: 0.937, blue: 0.918),
-        editorBackground: .white,
-        text: .black,
-        secondaryText: Color(red: 0.45, green: 0.45, blue: 0.45),
-        iconColor: Color(red: 0.20, green: 0.20, blue: 0.20),
-        iconColorDim: Color(red: 0.50, green: 0.50, blue: 0.50),
-        activeTabBackground: Color.white.opacity(0.8),
-        activeRowBackground: Color.black.opacity(0.08),
-        searchFieldBackground: Color.black.opacity(0.05),
-        searchHighlight: Color.yellow.opacity(0.55),
-        dividerColor: Color.black.opacity(0.10),
-        copyButtonBackground: .black,
-        copyButtonText: .white,
-        editorBackgroundNS: .white,
-        textNS: .black,
+        editorBackground: Color(red: 0.988, green: 0.984, blue: 0.973),
+        text: Color(red: 0.173, green: 0.165, blue: 0.149),
+        secondaryText: Color(red: 0.435, green: 0.424, blue: 0.396),
+        iconColor: Color(red: 0.231, green: 0.224, blue: 0.204),
+        iconColorDim: Color(red: 0.541, green: 0.529, blue: 0.502),
+        activeTabBackground: Color.white.opacity(0.85),
+        activeRowBackground: Color.black.opacity(0.07),
+        searchFieldBackground: Color.black.opacity(0.045),
+        searchHighlight: Color(red: 1.0, green: 0.78, blue: 0.30).opacity(0.45),
+        dividerColor: Color.black.opacity(0.09),
+        copyButtonBackground: Color(red: 0.173, green: 0.165, blue: 0.149),
+        copyButtonText: Color(red: 0.988, green: 0.984, blue: 0.973),
+        editorBackgroundNS: NSColor(red: 0.988, green: 0.984, blue: 0.973, alpha: 1),
+        textNS: lightInkNS,
         chromeBackgroundNS: NSColor(red: 0.941, green: 0.937, blue: 0.918, alpha: 1),
-        linkNS: .systemBlue,
-        tableBorderNS: NSColor(white: 0.75, alpha: 1),
-        tableHeaderBgNS: NSColor(white: 0.94, alpha: 1),
-        selectionBackgroundNS: NSColor(red: 0.20, green: 0.47, blue: 0.96, alpha: 0.22),
-        selectedTextNS: .black,
+        linkNS: NSColor(red: 0.149, green: 0.404, blue: 0.788, alpha: 1),        // #2667C9
+        tableBorderNS: NSColor(red: 0.812, green: 0.800, blue: 0.769, alpha: 1), // #CFCCC4
+        tableHeaderBgNS: NSColor(red: 0.945, green: 0.937, blue: 0.914, alpha: 1), // #F1EFE9
+        selectionBackgroundNS: NSColor(red: 0.243, green: 0.463, blue: 0.839, alpha: 0.20),
+        selectedTextNS: lightInkNS,
         appearance: .aqua,
         colorScheme: .light
     )
 
-    // Everything pure #000000. A single #2e2e2e hairline (dividerColor)
-    // separates the sidebar from the editor — that's the only visual
-    // distinction between the two surfaces.
+    // Dark — "warm graphite": layered surfaces (chrome #151412, editor
+    // lifted to #1D1C19 so content sits forward), soft warm-white ink.
+    // Body contrast ≈ 11.9:1 — readable without the halation of pure
+    // white on #000000.
     static let dark = Palette(
-        chromeBackground: .black,
-        editorBackground: .black,
-        text: Color(red: 0.91, green: 0.91, blue: 0.91),
-        secondaryText: Color(red: 0.62, green: 0.62, blue: 0.62),
-        iconColor: Color(red: 0.84, green: 0.84, blue: 0.84),
-        iconColorDim: Color(red: 0.55, green: 0.55, blue: 0.55),
-        activeTabBackground: Color.white.opacity(0.14),
-        activeRowBackground: Color.white.opacity(0.10),
-        searchFieldBackground: Color.white.opacity(0.08),
-        searchHighlight: Color.yellow.opacity(0.35),
-        dividerColor: Color(red: 0.18, green: 0.18, blue: 0.18),
-        copyButtonBackground: Color.white.opacity(0.20),
-        copyButtonText: .white,
-        editorBackgroundNS: .black,
-        textNS: NSColor(white: 0.91, alpha: 1),
-        chromeBackgroundNS: .black,
-        linkNS: .systemBlue,
-        tableBorderNS: NSColor(white: 0.30, alpha: 1),
-        tableHeaderBgNS: NSColor(white: 0.18, alpha: 1),
-        selectionBackgroundNS: NSColor(red: 0.32, green: 0.56, blue: 1.00, alpha: 0.38),
-        selectedTextNS: .white,
+        chromeBackground: Color(red: 0.082, green: 0.078, blue: 0.071),
+        editorBackground: Color(red: 0.114, green: 0.110, blue: 0.098),
+        text: Color(red: 0.855, green: 0.843, blue: 0.820),
+        secondaryText: Color(red: 0.557, green: 0.545, blue: 0.522),
+        iconColor: Color(red: 0.761, green: 0.749, blue: 0.725),
+        iconColorDim: Color(red: 0.502, green: 0.490, blue: 0.467),
+        activeTabBackground: Color.white.opacity(0.09),
+        activeRowBackground: Color.white.opacity(0.07),
+        searchFieldBackground: Color.white.opacity(0.06),
+        searchHighlight: Color(red: 1.0, green: 0.72, blue: 0.30).opacity(0.30),
+        dividerColor: Color(red: 0.165, green: 0.161, blue: 0.145),
+        copyButtonBackground: Color.white.opacity(0.16),
+        copyButtonText: Color(red: 0.925, green: 0.918, blue: 0.902),
+        editorBackgroundNS: NSColor(red: 0.114, green: 0.110, blue: 0.098, alpha: 1),
+        textNS: darkInkNS,
+        chromeBackgroundNS: NSColor(red: 0.082, green: 0.078, blue: 0.071, alpha: 1),
+        linkNS: NSColor(red: 0.435, green: 0.659, blue: 0.910, alpha: 1),        // #6FA8E8
+        tableBorderNS: NSColor(red: 0.227, green: 0.220, blue: 0.200, alpha: 1), // #3A3833
+        tableHeaderBgNS: NSColor(red: 0.149, green: 0.145, blue: 0.122, alpha: 1), // #26251F
+        selectionBackgroundNS: NSColor(red: 0.290, green: 0.471, blue: 0.761, alpha: 0.35),
+        selectedTextNS: NSColor(red: 0.925, green: 0.918, blue: 0.902, alpha: 1),
         appearance: .darkAqua,
         colorScheme: .dark
     )
@@ -101,6 +125,13 @@ final class ThemeStore: ObservableObject {
     static let shared = ThemeStore()
 
     @Published var mode: ThemeMode {
+        willSet {
+            // Fire before anything repaints so the cross-fade can snapshot
+            // the windows while they still show the outgoing theme.
+            if newValue != mode {
+                NotificationCenter.default.post(name: .themeWillChange, object: nil)
+            }
+        }
         didSet {
             UserDefaults.standard.set(mode.rawValue, forKey: "themeMode")
             NotificationCenter.default.post(name: .themeChanged, object: nil)

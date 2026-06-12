@@ -19,6 +19,7 @@ struct NoteFlowLogo: View {
 struct TabBarView: View {
     @EnvironmentObject var store: NoteStore
     @EnvironmentObject var theme: ThemeStore
+    @EnvironmentObject var windowState: WindowState
     /// In the main window we reserve ~70pt of leading space so the macOS
     /// red/yellow/green buttons don't overlap the logo and tabs.
     var needsTrafficLightSpace: Bool = false
@@ -58,7 +59,31 @@ struct TabBarView: View {
 
             // Expand & close
             HStack(spacing: 10) {
-                if !isFloatingPanel {
+                // The floating panel has no sidebar rail, so the Text
+                // Formatting toggle lives here instead.
+                if isFloatingPanel {
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.15)) {
+                            windowState.formattingVisible.toggle()
+                        }
+                    } label: {
+                        Text("AA")
+                            .font(.system(size: 12, weight: windowState.formattingVisible ? .bold : .regular))
+                            .foregroundColor(windowState.formattingVisible
+                                             ? theme.palette.text
+                                             : theme.palette.iconColor)
+                            .frame(width: 28, height: 28)
+                            .background(Color.white.opacity(0.001))
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("Text Formatting")
+                }
+
+                // Expand-to-full only makes sense from the floating panel —
+                // it dismisses the panel and brings the main window forward.
+                // In the main window it would be a no-op.
+                if isFloatingPanel {
                     Button {
                         DispatchQueue.main.async {
                             (NSApp.delegate as? AppDelegate)?.expandToFull()
@@ -72,6 +97,7 @@ struct TabBarView: View {
                             .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
+                    .help("Expand to Full App")
                 }
 
                 Button {

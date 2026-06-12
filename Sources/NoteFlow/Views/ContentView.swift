@@ -32,26 +32,34 @@ struct ContentView: View {
             HStack(spacing: 0) {
                 // Unified sidebar: collapses to an icon rail, expands to
                 // icons + labels + the notes list as one continuous panel.
-                SidebarIconBar()
-                    .environmentObject(store)
+                // Hidden entirely in the floating panel — quick capture
+                // wants maximum text width; the tab bar's + and AA buttons
+                // cover new-note and formatting there.
+                if !isFloatingPanel {
+                    SidebarIconBar()
+                        .environmentObject(store)
 
-                Rectangle()
-                    .fill(theme.palette.dividerColor)
-                    .frame(width: 1)
+                    Rectangle()
+                        .fill(theme.palette.dividerColor)
+                        .frame(width: 1)
+                }
 
                 // Main editor area
                 Group {
                     if let note = store.activeNote {
                         VStack(spacing: 0) {
-                            // Editor fills available space
-                            NoteEditorView(note: note)
+                            // Editor fills available space. The floating
+                            // panel uses compact margins/insets so text,
+                            // not chrome, gets the space.
+                            NoteEditorView(note: note, compact: isFloatingPanel)
                                 .id(note.id)
                                 .environmentObject(store)
                                 .background(theme.palette.editorBackground)
                                 .clipShape(RoundedRectangle(cornerRadius: 12))
-                                .padding(.top, 12)
-                                .padding(.trailing, 16)
-                                .padding(.bottom, windowState.formattingVisible ? 0 : 16)
+                                .padding(.top, isFloatingPanel ? 6 : 12)
+                                .padding(.leading, isFloatingPanel ? 8 : 0)
+                                .padding(.trailing, isFloatingPanel ? 8 : 16)
+                                .padding(.bottom, windowState.formattingVisible ? 0 : (isFloatingPanel ? 8 : 16))
                                 .transition(.opacity)
 
                             // Formatting toolbar

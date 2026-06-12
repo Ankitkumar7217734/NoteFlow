@@ -17,11 +17,16 @@ swift run NoteFlow
 
 # Build a release .app bundle + styled .dmg in the repo root
 bash scripts/make-dmg.sh
+
+# Run the tests (Swift Testing, in Tests/NoteFlowTests)
+bash scripts/test.sh
 ```
 
 After changing `AppDelegate.swift`, kill the running process and relaunch — `swift run` does not hot-reload.
 
-`scripts/make-dmg.sh` does `swift build -c release`, assembles a `.app` bundle (Info.plist + AppIcon.icns generated from `Sources/NoteFlow/Resources/logo.png` via `sips`/`iconutil`), renders the DMG background via `scripts/make-background.swift`, and styles the volume window with AppleScript. There are no tests and no lint tooling configured.
+`scripts/make-dmg.sh` does `swift build -c release`, assembles a `.app` bundle (Info.plist + AppIcon.icns generated from `Sources/NoteFlow/Resources/logo.png` via `sips`/`iconutil`), renders the DMG background via `scripts/make-background.swift`, and styles the volume window with AppleScript. No lint tooling is configured.
+
+Tests use **Swift Testing** (`import Testing`, `@Test`/`#expect`) in `Tests/NoteFlowTests`. Run them with `bash scripts/test.sh`, **not** plain `swift test` — on a Command Line Tools-only machine (no full Xcode) the Testing framework lives outside the default search paths and `swift test` fails with "no such module 'Testing'"; the script adds the required `-F`/`-rpath` flags and falls back to plain `swift test` when they're not needed. Tests inject a temp-dir save URL via `NoteStore(saveURL:)` so they never touch the real `notes.json`.
 
 ## Architecture
 
@@ -50,10 +55,14 @@ On show (`toggleFloating()`):
 
 On dismiss: `floatingPanel.orderOut(nil)`, then `previousApp?.activate()` restores the user's previous app.
 
-The panel is configured with:
+The panel's full configuration lives in **`FloatingPanel.init(contentSize:)`** (not in AppDelegate) so it's pinned by `PanelTests.floatingPanelKeepsItsLoadBearingConfiguration`:
 - Style mask: `[.nonactivatingPanel, .resizable, .fullSizeContentView]`. `.nonactivatingPanel` is what lets the panel become key without activating the app (preventing the Space switch above).
-- `level = .screenSaver` and `collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]` so it overlays full-screen apps on every Space.
+- `level = .screenSaver` and `collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]` so it overlays full-screen apps on every Space. **Ordering gotcha:** `isFloatingPanel = true` must be set *before* `level` — setting it resets the level to `.floating`(3), which silently undid `.screenSaver` for the app's entire prior history until the pin test caught it.
 - `backgroundColor = .clear`, `isOpaque = false`, and the hosting view's `CALayer` has `cornerRadius = 14` / `masksToBounds = true` to produce rounded corners without a title bar.
+
+**Panel fluidity (`PanelSettings`, in `Models/`):** singleton ObservableObject persisting `opacity` (0.5–1.0 floor — an invisible panel would still swallow keystrokes; Settings slider, applied live via `.panelOpacityChanged`, entrance animation fades to it) and `panelSize` (saved on live-resize end, reused re-centered on every summon). **Gotcha:** `opacity` is a clamping *computed* setter over `@Published private var storedOpacity` — do not refactor the clamp into a `didSet` on the `@Published` var; re-reading/re-assigning a `@Published` property inside its own observer re-enters Combine's enclosing-instance subscript and crashes the Swift runtime.
+
+**Compact panel layout:** in the floating panel, `ContentView` hides the sidebar rail entirely and `NoteEditorView`/`RichTextEditor` take `compact: true` (text insets 14pt instead of 28pt, tighter editor margins), so ~440pt of the 520pt default width is text. The tab bar shows an **AA** formatting toggle only in the panel (the rail that normally hosts it is hidden); new-note stays via the tab bar's +.
 
 **`FloatingPanel` exists specifically to override `canBecomeKey`/`canBecomeMain` to return `true`.** A title-bar-less `.nonactivatingPanel` would otherwise refuse to become key, and `NSTextView` inside it would silently drop keystrokes. Both flags are required — don't remove either.
 
@@ -68,13 +77,13 @@ Registered via Carbon `RegisterEventHotKey` (not `NSEvent.addGlobalMonitorForEve
 `NoteStore` (singleton `ObservableObject`) is the single source of truth for *data*. It owns:
 - `notes: [Note]` and tab state (`openTabIds`, `activeTabId`).
 - `isFloating` — global so each window's `TabBarView` can adapt its close/expand buttons.
-- Persistence to `~/Library/Application Support/NoteFlow/notes.json`.
+- Persistence to `~/Library/Application Support/NoteFlow/notes.json`. If that file exists but fails to decode at launch, it is moved aside as `notes.json.corrupt-<timestamp>` (never overwritten) before a fresh store is created.
 
 `WindowState` is a separate per-`ContentView` `ObservableObject` for *UI* state (sidebar open, search text, formatting toolbar visibility, search-focus request, `viewingTrash`, and the `selectedTag` tag filter). Each `ContentView` instantiates its own with `@StateObject`, so toggling the sidebar in the main window doesn't toggle it in the floating panel.
 
 `Note` is a `Codable` struct. Rich text is stored as RTF `Data`; titles are stored separately on the struct (not auto-extracted at load). It also carries `deletedAt` (non-nil ⇒ trashed), `isPinned`, and `tags: [String]`. A hand-written `init(from:)` decodes missing keys to safe defaults, so `notes.json` written by older versions (which lacked these fields) still loads.
 
-**Debounced persistence.** Typing never writes to disk synchronously. `RichTextEditor`'s delegate calls `NoteStore.noteBodyDidChange(_:)` on every keystroke, which marks the note id dirty and (re)arms a 0.6 s timer (`saveDebounceInterval`) instead of encoding RTF + writing `notes.json` each time — the shared `NSTextStorage` holds the live text in the meantime, so nothing is lost. `flushPendingSaves()` encodes each dirty note's storage to RTF, folds it into the model, and writes once typing pauses; `AppDelegate` also calls it on `applicationWillResignActive` / `applicationWillTerminate` so the last keystrokes survive an app switch or quit. `updateNote` is the separate immediate-write path used for title / metadata edits.
+**Debounced persistence.** Typing never writes to disk synchronously. `RichTextEditor`'s delegate calls `NoteStore.noteBodyDidChange(_:)` on every keystroke, which marks the note id dirty and (re)arms a 0.6 s timer (`saveDebounceInterval`) instead of encoding RTF + writing `notes.json` each time — the shared `NSTextStorage` holds the live text in the meantime, so nothing is lost. When the timer fires, `flushPendingSavesInBackground()` snapshots each dirty note's storage on the main thread, RTF-encodes on a background queue (the expensive part — encoding on main caused a typing hitch), and applies + persists back on main. Dirty ids stay marked until the encoded data is applied, and a per-note edit-generation counter keeps a note dirty if the user typed during the encode, so nothing is ever skipped or clobbered. The fully synchronous `flushPendingSaves()` remains; `AppDelegate` calls it on `applicationWillResignActive` / `applicationWillTerminate` so the last keystrokes survive an app switch or quit. `updateNote` is the separate immediate-write path used for title / metadata edits.
 
 **Trash, pinning, tags.** `deleteNote` is a *soft* delete — it sets `deletedAt` and closes the tab but keeps the note's shared `NSTextStorage` + plain-text cache, so `restoreNote` brings it back intact (including edits not yet re-encoded to RTF). `permanentlyDeleteNote` / `emptyTrash` are the hard deletes that also drop the storage and cache. `togglePin` and `addTag`/`removeTag` round out mutation — tags are normalized to trimmed-lowercase, so `Work` and ` work ` collapse to one. `filteredNotes(matching:tag:)` is the sidebar's list source: it drops trashed notes, applies the optional tag filter + search query (matches title, tags, then cached plain text), and sorts **pinned-first, then `updatedAt` descending**. Trashed notes are reached separately via `trashedNotes` and the sidebar's Trash view.
 
@@ -91,6 +100,7 @@ Registered via Carbon `RegisterEventHotKey` (not `NSEvent.addGlobalMonitorForEve
 - **Default body size.** `EditorTypography.baseFontSize` (currently **14 pt**) is the canonical size, used by the text view's typing attributes, paste sanitization, inline-code, and table cells. New notes type at this size; existing notes keep whatever size is baked into their RTF.
 - **Paste sanitization.** `RichTextEditor.sanitize` strips foreign styling (background colors, shadows, stroke/expansion/obliqueness), removes baked foreground colors (so the theme-driven `textColor` drives rendering — see the theming gotcha), and rewrites every run's font to the base family **preserving bold / italic / mono traits**, then runs the paragraph-style + whitespace normalizers. `autoLink` linkifies URLs in the pasted text afterward.
 - **Keyboard + lists.** There's no SwiftUI Format menu, so `NoteTextView.performKeyEquivalent` intercepts `⌘B` / `⌘I` / `⌘U` (and shifted variants) directly; `insertNewline` auto-continues list prefixes (`• `, incrementing `1. `, `☐ `).
+- **Typing performance / layout mode.** `NoteLayoutManager` defaults to `allowsNonContiguousLayout = true` so un-laid text height is *estimated* — without it, NSTextView's fit-to-content sizing forces a full-document layout on **every keystroke** (typing slows as a note grows). `didChangeText` forces layout for only the caret's line + visible viewport. **Exception:** notes containing an `NSTextTable` run in contiguous mode (NSTextTable glitches under non-contiguous layout); this is enforced at note open (`makeNSView`), on paste of table content, and on toolbar table insert via `NoteTextView.containsTables` / `disableNonContiguousLayout`. Don't re-add a full `ensureLayout(for:)` to `didChangeText`, and route any new table-insertion path through the same disable call.
 - **Font-size control.** `FormattingToolbarView` has a font-size popover (−/+ stepper + presets) that resizes the selection — or the typing attributes when nothing is selected — via `NSFontManager.convert(_:toSize:)`, preserving traits. The toolbar's link / table / color / font-size popovers all **capture the text view + selection before presenting** (`savedTextView` / `savedRange`), because presenting a popover takes first responder and clears the live selection.
 
 ### Link title fetching
@@ -112,7 +122,7 @@ PDF and Word exports re-base default body text to **10 pt** via `normalizingFont
 
 ### Settings
 
-`HotkeyStore.shared` stores `keyCode: UInt32` and `carbonModifiers: UInt32` (Carbon modifier flags — `controlKey`, `optionKey`, `shiftKey`, `cmdKey` — **not** `NSEvent.ModifierFlags`; they differ). `SettingsView` contains `ShortcutRecorderButton`, which installs a temporary local event monitor to capture the next key combo and posts `Notification.Name.hotkeyChanged`.
+`HotkeyStore.shared` stores `keyCode: UInt32` and `carbonModifiers: UInt32` (Carbon modifier flags — `controlKey`, `optionKey`, `shiftKey`, `cmdKey` — **not** `NSEvent.ModifierFlags`; they differ). `SettingsView` contains `ShortcutRecorderButton`, which installs a temporary local event monitor to capture the next key combo and posts `Notification.Name.hotkeyChanged`. Combos are converted/validated by `HotkeyStore.carbonModifiers(from:)`, which returns `nil` for shift-only or modifier-less combos — registering those globally would swallow normal typing system-wide, so the recorder keeps listening until a combo with ⌃/⌥/⌘ arrives.
 
 ### View hierarchy
 
@@ -132,11 +142,13 @@ NoteFlowApp (@main)
         └── ContentView(isFloatingPanel: true)   # Same component, separate WindowState, same NoteStore.shared
 ```
 
-The close button in `TabBarView` checks `store.isFloating`: if `true` it calls `AppDelegate.toggleFloating()` (dismiss panel); otherwise it closes the main window. `NoteListPanel.swift` only defines `NoteRow` now — the panel itself is folded into `SidebarIconBar`.
+`TabBarView`'s `isFloatingPanel` flag routes the close button: in the panel it calls `AppDelegate.toggleFloating()` (dismiss + restore previous app); in the main window it closes the window. The expand-to-full button renders **only in the floating panel** — it dismisses the panel and activates the main window; in the main window it would be a no-op. `NoteListPanel.swift` only defines `NoteRow` now — the panel itself is folded into `SidebarIconBar`.
 
 ### Appearance & theming
 
-`ThemeStore.shared` (singleton `ObservableObject`, in `Models/Theme.swift`) holds `mode: .light | .dark`, persisted to `UserDefaults` under `themeMode`. Its `palette` returns a `Palette` value that bundles every named color **twice** — a SwiftUI `Color` for SwiftUI views and the matching `NSColor` for AppKit chrome — plus the `NSAppearance.Name` (`.aqua` / `.darkAqua`) and `ColorScheme` for that mode. Light is the cream/white scheme (`#F0F0EA` chrome); dark is near-pure black with a single hairline divider. There is **no longer** a hard-coded `.aqua` pin.
+`ThemeStore.shared` (singleton `ObservableObject`, in `Models/Theme.swift`) holds `mode: .light | .dark`, persisted to `UserDefaults` under `themeMode`. Its `palette` returns a `Palette` value that bundles every named color **twice** — a SwiftUI `Color` for SwiftUI views and the matching `NSColor` for AppKit chrome — plus the `NSAppearance.Name` (`.aqua` / `.darkAqua`) and `ColorScheme` for that mode. Both palettes follow the **"Paper & Ink"** scheme, tuned for long writing sessions (body-text contrast in the ~9–16:1 comfort band, enforced by tests in `ThemeTests.swift`): light keeps the cream chrome identity with a paper-tinted editor (`#FCFBF8`) and warm near-black ink (`#2C2A26`); dark is layered warm graphite — chrome `#151412`, editor lifted to `#1D1C19` — with soft warm-white ink (`#DAD7D1`). There is **no longer** a hard-coded `.aqua` pin.
+
+**Theme switch cross-fade.** `ThemeStore.mode` posts `themeWillChange` from `willSet` *before* the mode mutates; `AppDelegate.prepareThemeCrossFade` snapshots every visible window's content view into an identifier-tagged `NSImageView` overlay while it still shows the old theme. `applyTheme` (on `themeChanged`) repaints underneath and fades the overlays out over 0.28 s. The early signal exists because observer order on `themeChanged` is not guaranteed — snapshotting there would race the repaints.
 
 Two propagation paths, because SwiftUI and AppKit observe differently:
 - **SwiftUI views** read `theme.palette.*` via `@EnvironmentObject var theme: ThemeStore` and re-render automatically when `mode` changes.
@@ -144,6 +156,6 @@ Two propagation paths, because SwiftUI and AppKit observe differently:
 
 The Settings toggle (`SettingsView`, hosted by the `Settings { }` scene in `NoteFlowApp`) just flips `theme.isDark`.
 
-**Gotcha — theme-default foreground stripping.** Light body text is black; dark body text is ~0.91 white. Either gets baked into the RTF / typing attributes as an explicit `.foregroundColor`, so after a theme flip that color would render invisible against the new background. `NoteStore.stripThemeDefaultForegroundColors` removes only foreground colors that match a theme default (within a small tolerance), leaving user-picked colors from the Text Formatting picker intact. It runs when a shared storage is first built (`sharedTextStorage`) and across every live storage on each `themeChanged`. If you add a new default text color, add it to `NoteStore.themeDefaultColors` or it will get stranded on theme switches.
+**Gotcha — theme-default foreground stripping.** The editor's default text color is `Palette.dynamicInkNS` (a named dynamic `NSColor` resolving to `Palette.lightInkNS` `#2C2A26` / `Palette.darkInkNS` `#DAD7D1` per appearance — same mechanism as `NSColor.textColor`). Whichever ink is current gets baked into the RTF / typing attributes as an explicit `.foregroundColor`, so after a theme flip that color would render invisible against the new background. `NoteStore.stripThemeDefaultForegroundColors` removes only foreground colors that match a theme default (within a small tolerance), leaving user-picked colors from the Text Formatting picker intact. It runs when a shared storage is first built (`sharedTextStorage`) and across every live storage on each `themeChanged`. `NoteStore.themeDefaultColors` has **four** entries — legacy black, legacy `0.91` white (pre-Paper & Ink notes), and both current inks. If you change a default ink, add the new value to that list *and keep the old ones* or existing notes' text gets stranded on theme switches (guarded by `allFourDefaultInksAreStripped` in `ThemeTests.swift`).
 
 The Dock icon is set in-process via `NSApp.applicationIconImage = AppLogo.processed` (in `Models/AppLogo.swift`). This is necessary because `swift run` launches a bare executable — there's no `.icns` in an `.app` bundle to pick up — so the icon is regenerated on every launch. The packaged `.app` from `make-dmg.sh` still uses a real `AppIcon.icns`.

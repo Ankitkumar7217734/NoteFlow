@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 import Carbon
 
 class HotkeyStore: ObservableObject {
@@ -16,6 +17,20 @@ class HotkeyStore: ObservableObject {
         let savedMods = UserDefaults.standard.object(forKey: "hotkeyModifiers") as? Int
         keyCode        = savedCode.map(UInt32.init) ?? UInt32(kVK_ANSI_D)
         carbonModifiers = savedMods.map(UInt32.init) ?? UInt32(optionKey)
+    }
+
+    /// Map NSEvent modifier flags to Carbon modifier bits for
+    /// RegisterEventHotKey. Returns nil when the combo lacks a non-shift
+    /// modifier (⌃ ⌥ ⌘) — a shift-only or bare-key global hotkey would
+    /// swallow normal typing (e.g. every capital S) system-wide.
+    static func carbonModifiers(from flags: NSEvent.ModifierFlags) -> UInt32? {
+        var mods: UInt32 = 0
+        if flags.contains(.control) { mods |= UInt32(controlKey) }
+        if flags.contains(.option)  { mods |= UInt32(optionKey) }
+        if flags.contains(.shift)   { mods |= UInt32(shiftKey) }
+        if flags.contains(.command) { mods |= UInt32(cmdKey) }
+        guard mods & UInt32(controlKey | optionKey | cmdKey) != 0 else { return nil }
+        return mods
     }
 
     var displayString: String {

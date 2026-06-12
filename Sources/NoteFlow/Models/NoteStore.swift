@@ -33,6 +33,16 @@ class NoteStore: ObservableObject {
     private var pendingDirtyNoteIds: Set<UUID> = []
     private var saveDebounceTimer: Timer?
     private let saveDebounceInterval: TimeInterval = 0.6
+    // RTF-encoding a long note takes visible milliseconds; doing it on the
+    // main thread caused a typing hitch whenever the debounce fired. The
+    // timer path encodes on this queue instead (see
+    // flushPendingSavesInBackground); the synchronous flushPendingSaves()
+    // remains for app-switch / quit, where blocking is the point.
+    private let encodeQueue = DispatchQueue(label: "com.noteflow.rtf-encode", qos: .utility)
+    // Bumped on every keystroke per note. Lets a background flush detect
+    // "the user typed while I was encoding" and keep the note dirty so the
+    // newer text is re-encoded by the next flush.
+    private var editGenerations: [UUID: UInt64] = [:]
 
     func sharedTextStorage(for id: UUID) -> NSTextStorage {
         if let existing = sharedStorages[id] {
@@ -67,8 +77,10 @@ class NoteStore: ObservableObject {
     // We compare against these when deciding which foreground colors to
     // strip so the user's explicitly-picked colors survive.
     private static let themeDefaultColors: [NSColor] = [
-        .black,                                      // legacy + light theme
-        NSColor(white: 0.91, alpha: 1)               // dark theme
+        .black,                                      // legacy light default
+        NSColor(white: 0.91, alpha: 1),              // legacy dark default
+        Palette.lightInkNS,                          // Paper & Ink light (#2C2A26)
+        Palette.darkInkNS                            // Paper & Ink dark (#DAD7D1)
     ]
 
     private static func isThemeDefault(_ color: NSColor) -> Bool {
@@ -147,7 +159,12 @@ class NoteStore: ObservableObject {
         }
     }
 
+    // Tests inject a temp-directory URL here so they never touch the real
+    // notes.json in Application Support. nil (the app) uses the default path.
+    private let saveURLOverride: URL?
+
     private var saveURL: URL {
+        if let override = saveURLOverride { return override }
         let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("NoteFlow", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -210,7 +227,8 @@ class NoteStore: ObservableObject {
         return plain
     }
 
-    init() {
+    init(saveURL: URL? = nil) {
+        self.saveURLOverride = saveURL
         load()
         // When the theme flips, any text the user has already typed in the
         // current session has an explicit .foregroundColor baked into its
@@ -279,11 +297,74 @@ class NoteStore: ObservableObject {
     /// disk write happen in flushPendingSaves() once typing pauses.
     func noteBodyDidChange(_ id: UUID) {
         pendingDirtyNoteIds.insert(id)
+        editGenerations[id, default: 0] += 1
         saveDebounceTimer?.invalidate()
         saveDebounceTimer = Timer.scheduledTimer(
             withTimeInterval: saveDebounceInterval, repeats: false
         ) { [weak self] _ in
-            self?.flushPendingSaves()
+            self?.flushPendingSavesInBackground()
+        }
+    }
+
+    /// Debounce-timer flush. Snapshots dirty storages on the main thread
+    /// (cheap copy), RTF-encodes on a background queue (the expensive part),
+    /// then applies the result and persists back on the main thread — so the
+    /// save never stalls typing the way the synchronous flush did.
+    ///
+    /// Safety invariants:
+    /// - Dirty ids are NOT cleared until their encoded data is applied, so
+    ///   the synchronous flush (app switch / quit) can never miss edits that
+    ///   were mid-encode.
+    /// - A note edited *during* encoding (edit-generation mismatch) stays
+    ///   dirty; the re-armed debounce re-encodes the newer text. Its stale
+    ///   snapshot is still applied — newer than disk, older than live.
+    /// - If a synchronous flush raced ahead and already persisted newer
+    ///   content (clearing the dirty mark), the late apply is skipped.
+    func flushPendingSavesInBackground(completion: (() -> Void)? = nil) {
+        saveDebounceTimer?.invalidate()
+        saveDebounceTimer = nil
+        guard !pendingDirtyNoteIds.isEmpty else { completion?(); return }
+
+        var snapshots: [(id: UUID, text: NSAttributedString, generation: UInt64)] = []
+        for id in Array(pendingDirtyNoteIds) {
+            guard let storage = sharedStorages[id] else {
+                // Note was permanently deleted while dirty — nothing to save.
+                pendingDirtyNoteIds.remove(id)
+                continue
+            }
+            snapshots.append((id, NSAttributedString(attributedString: storage),
+                              editGenerations[id] ?? 0))
+        }
+        guard !snapshots.isEmpty else { completion?(); return }
+
+        encodeQueue.async { [weak self] in
+            let encoded: [(id: UUID, data: Data, generation: UInt64)] = snapshots.compactMap {
+                let full = NSRange(location: 0, length: $0.text.length)
+                guard let data = try? $0.text.data(
+                    from: full,
+                    documentAttributes: [.documentType: NSAttributedString.DocumentType.rtf]
+                ) else { return nil }
+                return ($0.id, data, $0.generation)
+            }
+            DispatchQueue.main.async {
+                defer { completion?() }
+                guard let self else { return }
+                let now = Date()
+                var didApply = false
+                for item in encoded {
+                    guard self.pendingDirtyNoteIds.contains(item.id),
+                          let idx = self.notes.firstIndex(where: { $0.id == item.id })
+                    else { continue }
+                    self.notes[idx].rtfData = item.data
+                    self.notes[idx].updatedAt = now
+                    self.plainTextCache.removeValue(forKey: item.id)
+                    didApply = true
+                    if self.editGenerations[item.id] == item.generation {
+                        self.pendingDirtyNoteIds.remove(item.id)
+                    }
+                }
+                if didApply { self.save() }
+            }
         }
     }
 
@@ -302,10 +383,15 @@ class NoteStore: ObservableObject {
             guard let idx = notes.firstIndex(where: { $0.id == id }),
                   let storage = sharedStorages[id] else { continue }
             let full = NSRange(location: 0, length: storage.length)
-            notes[idx].rtfData = try? storage.data(
+            // Keep the last good rtfData if encoding ever fails — assigning
+            // a failed `try?` result directly would null out the note's
+            // persisted content.
+            if let encoded = try? storage.data(
                 from: full,
                 documentAttributes: [.documentType: NSAttributedString.DocumentType.rtf]
-            )
+            ) {
+                notes[idx].rtfData = encoded
+            }
             notes[idx].updatedAt = now
             plainTextCache.removeValue(forKey: id)
         }
@@ -398,8 +484,16 @@ class NoteStore: ObservableObject {
     }
 
     private func load() {
-        guard let data = try? Data(contentsOf: saveURL),
-              let decoded = try? JSONDecoder().decode([Note].self, from: data) else {
+        guard let data = try? Data(contentsOf: saveURL) else {
+            // No store file yet (first launch) — start fresh.
+            newNote()
+            return
+        }
+        guard let decoded = try? JSONDecoder().decode([Note].self, from: data) else {
+            // The file exists but can't be decoded. Move it aside before
+            // newNote() → save() writes a fresh store, so one corrupt byte
+            // can never silently erase the user's entire note history.
+            backupCorruptStoreFile()
             newNote()
             return
         }
@@ -412,6 +506,17 @@ class NoteStore: ObservableObject {
         } else {
             newNote()
         }
+    }
+
+    /// Preserve an undecodable notes.json as notes.json.corrupt-<timestamp>
+    /// next to the original, so it can be inspected / recovered by hand.
+    private func backupCorruptStoreFile() {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyyMMdd-HHmmss"
+        let name = saveURL.lastPathComponent + ".corrupt-" + formatter.string(from: Date())
+        let destination = saveURL.deletingLastPathComponent().appendingPathComponent(name)
+        try? FileManager.default.moveItem(at: saveURL, to: destination)
     }
 
     func save() {
