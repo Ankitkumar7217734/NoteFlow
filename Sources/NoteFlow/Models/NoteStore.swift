@@ -58,7 +58,7 @@ class NoteStore: ObservableObject {
                 // (red, blue, etc. from the Text Formatting picker) are
                 // preserved.
                 let mutable = NSMutableAttributedString(attributedString: attr)
-                Self.stripThemeDefaultForegroundColors(in: mutable)
+                Self.replaceThemeDefaultForegroundColors(in: mutable)
                 // Reset foreign paragraph indents/alignment baked in by old
                 // pastes so existing notes render with one straight left
                 // margin. Tables (textBlocks) are preserved.
@@ -106,6 +106,25 @@ class NoteStore: ObservableObject {
         }
         for range in rangesToClear {
             storage.removeAttribute(.foregroundColor, range: range)
+        }
+    }
+
+    /// Same as stripThemeDefaultForegroundColors but replaces matched colors
+    /// with Palette.dynamicInkNS instead of removing them. Text with no
+    /// foreground attribute falls back to black in AppKit — not to
+    /// textColor — so a removal leaves text invisible in dark mode.
+    /// Replacing with the dynamic ink means the attribute is always present
+    /// and re-resolves automatically whenever the view's appearance changes.
+    static func replaceThemeDefaultForegroundColors(in storage: NSMutableAttributedString) {
+        guard storage.length > 0 else { return }
+        let full = NSRange(location: 0, length: storage.length)
+        var rangesToReplace: [NSRange] = []
+        storage.enumerateAttribute(.foregroundColor, in: full, options: []) { value, range, _ in
+            guard let color = value as? NSColor else { return }
+            if isThemeDefault(color) { rangesToReplace.append(range) }
+        }
+        for range in rangesToReplace {
+            storage.addAttribute(.foregroundColor, value: Palette.dynamicInkNS, range: range)
         }
     }
 
@@ -243,13 +262,17 @@ class NoteStore: ObservableObject {
     }
 
     @objc private func stripForegroundColorsAcrossStorages() {
-        // Only clear runs whose color matches a theme default (the
-        // implicit black/light text color baked in by typingAttributes).
-        // User-picked colors from the formatting toolbar — red, blue,
-        // etc. — keep their value across theme flips.
+        // Replace runs whose color matches a theme default with
+        // Palette.dynamicInkNS. Removing the attribute entirely (the old
+        // approach) caused black text: AppKit's fallback for no foreground
+        // attribute is black, not the text view's textColor property.
+        // The dynamic ink re-resolves to the correct color on every redraw
+        // once applyPalette has updated the text view's appearance.
+        // User-picked colors from the formatting toolbar are not theme
+        // defaults and are left untouched.
         for (_, storage) in sharedStorages where storage.length > 0 {
             storage.beginEditing()
-            Self.stripThemeDefaultForegroundColors(in: storage)
+            Self.replaceThemeDefaultForegroundColors(in: storage)
             storage.endEditing()
         }
     }

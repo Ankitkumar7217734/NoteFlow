@@ -35,6 +35,32 @@ struct TabBarView: View {
                 .padding(.leading, needsTrafficLightSpace ? 78 : 8)
                 .padding(.trailing, 6)
 
+            // Sidebar toggle — only in the floating panel, which otherwise
+            // has no sidebar rail (ContentView hides it for maximum text
+            // width). This reveals the notes list (SidebarIconBar) so the
+            // user can browse / switch notes without expanding to the full
+            // window. The main window's sidebar has its own toggle in the
+            // rail, so this button isn't needed there.
+            if isFloatingPanel {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        windowState.sidebarOpen.toggle()
+                    }
+                } label: {
+                    Image(systemName: "sidebar.left")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundColor(windowState.sidebarOpen
+                                         ? theme.palette.text
+                                         : theme.palette.iconColor)
+                        .frame(width: 28, height: 28)
+                        .background(Color.white.opacity(0.001))
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help(windowState.sidebarOpen ? "Hide Notes" : "Show Notes")
+                .padding(.trailing, 2)
+            }
+
             // Scrollable tabs
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 2) {

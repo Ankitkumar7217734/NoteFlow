@@ -32,10 +32,12 @@ struct ContentView: View {
             HStack(spacing: 0) {
                 // Unified sidebar: collapses to an icon rail, expands to
                 // icons + labels + the notes list as one continuous panel.
-                // Hidden entirely in the floating panel — quick capture
-                // wants maximum text width; the tab bar's + and AA buttons
-                // cover new-note and formatting there.
-                if !isFloatingPanel {
+                // In the floating panel it's hidden by default — quick
+                // capture wants maximum text width — but the panel's tab-bar
+                // sidebar toggle can reveal it on demand via sidebarOpen.
+                // In the main window it's always present (it manages its own
+                // collapsed/expanded states internally).
+                if !isFloatingPanel || windowState.sidebarOpen {
                     SidebarIconBar()
                         .environmentObject(store)
 

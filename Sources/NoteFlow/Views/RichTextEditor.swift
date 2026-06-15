@@ -591,10 +591,12 @@ final class NoteTextView: NSTextView {
             result.removeAttribute(key, range: full)
         }
 
-        // Strip any pasted foreground color so the text view's theme-driven
-        // textColor controls the rendered color. Don't bake a static color
-        // in — otherwise pasted text stays e.g. black after a dark-mode flip.
-        result.removeAttribute(.foregroundColor, range: full)
+        // Replace any pasted foreground color with the dynamic ink so text
+        // immediately renders in the correct theme color and auto-adapts on
+        // theme switch. Removing the attribute entirely (old approach) left
+        // pasted text with no color attribute, which AppKit renders as black
+        // regardless of the text view's textColor or appearance.
+        result.addAttribute(.foregroundColor, value: Palette.dynamicInkNS, range: full)
 
         // Reset foreign paragraph styles (head/first-line indents, custom tab
         // stops, alignment) so pasted lines align to a single left margin
