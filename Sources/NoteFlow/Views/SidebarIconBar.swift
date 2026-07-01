@@ -80,6 +80,28 @@ struct SidebarIconBar: View {
                 store.newNote()
             }
 
+            SidebarRow(
+                icon: "key",
+                label: "New API Page",
+                expanded: isExpanded,
+                tooltip: "New API Page"
+            ) {
+                // The new API page opens in the active list — leave Trash if open.
+                windowState.viewingTrash = false
+                store.newAPIPage()
+            }
+
+            SidebarRow(
+                icon: "square.and.arrow.down",
+                label: "Import",
+                expanded: isExpanded,
+                tooltip: "Import Notes"
+            ) {
+                // Imported notes land in the active list — leave Trash if open.
+                windowState.viewingTrash = false
+                store.importFiles()
+            }
+
             // Search doesn't make sense while viewing Trash — hide it.
             if !windowState.viewingTrash {
                 if isExpanded {
@@ -421,9 +443,24 @@ struct NoteListRow: View {
                 Label(pinned ? "Unpin" : "Pin",
                       systemImage: pinned ? "pin.slash" : "pin")
             }
+            if liveNote.isAPIManager {
+                Button {
+                    MenuBarPinStore.shared.togglePagePin(noteId)
+                } label: {
+                    Label(
+                        MenuBarPinStore.shared.isPagePinned(noteId)
+                            ? "Unpin from Menu Bar"
+                            : "Pin to Menu Bar",
+                        systemImage: "menubar.rectangle"
+                    )
+                }
+            }
             Divider()
-            ExportSubmenu(noteId: noteId)
-            Divider()
+            // API pages have no RTF body to export — hide the Export submenu.
+            if !liveNote.isAPIManager {
+                ExportSubmenu(noteId: noteId)
+                Divider()
+            }
             Button(role: .destructive) {
                 store.deleteNote(noteId)
             } label: {

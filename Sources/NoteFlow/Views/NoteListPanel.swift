@@ -25,6 +25,12 @@ struct NoteRow: View {
                         .foregroundColor(theme.palette.iconColorDim)
                         .rotationEffect(.degrees(45))
                 }
+                // API pages get a key glyph so they read as a distinct page type.
+                if note.isAPIManager {
+                    Image(systemName: "key.fill")
+                        .font(.system(size: 9))
+                        .foregroundColor(theme.palette.iconColorDim)
+                }
                 Text(highlighted(
                     source: note.title,
                     query: query,
@@ -35,7 +41,12 @@ struct NoteRow: View {
                 .lineLimit(1)
             }
 
-            if let snippet = bodySnippet() {
+            if note.isAPIManager {
+                // No RTF body to snippet — summarize the stored providers/keys.
+                Text("\(note.providerCount) provider\(note.providerCount == 1 ? "" : "s") · \(note.keyCount) key\(note.keyCount == 1 ? "" : "s")")
+                    .font(.system(size: 11))
+                    .foregroundColor(theme.palette.secondaryText)
+            } else if let snippet = bodySnippet() {
                 Text(snippet)
                     .lineLimit(1)
                     .foregroundColor(theme.palette.secondaryText)

@@ -276,7 +276,11 @@ enum NoteExporter {
         // of UTF-16 units consumed becomes the offset where inline text starts.
         var marker = ""
         var prefixLen = 0
-        if lineText.hasPrefix("• ") {
+        if lineText.hasPrefix("▎ ") {
+            // Imported blockquote marker (see MarkdownParser.renderBlockquote)
+            // maps back to Markdown's "> ".
+            marker = "> "; prefixLen = 2
+        } else if lineText.hasPrefix("• ") {
             marker = "- "; prefixLen = 2
         } else if lineText.hasPrefix("☐ ") {
             marker = "- [ ] "; prefixLen = 2

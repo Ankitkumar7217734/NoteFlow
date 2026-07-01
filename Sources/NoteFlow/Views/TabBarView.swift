@@ -134,11 +134,7 @@ struct TabBarView: View {
                         if floating {
                             closeFloatingPanel()
                         } else {
-                            // Close the regular main window only — skip
-                            // NSPanels so we never target the floating one.
-                            NSApp.windows
-                                .first(where: { $0.isVisible && !($0 is NSPanel) })?
-                                .close()
+                            (NSApp.delegate as? AppDelegate)?.hideMainWindow()
                         }
                     }
                 } label: {
@@ -231,8 +227,11 @@ struct TabChip: View {
             }
         }
         .contextMenu {
-            ExportSubmenu(noteId: note.id)
-            Divider()
+            // API pages have no RTF body to export — hide the Export submenu.
+            if !note.isAPIManager {
+                ExportSubmenu(noteId: note.id)
+                Divider()
+            }
             Button {
                 store.closeTab(note.id)
             } label: {

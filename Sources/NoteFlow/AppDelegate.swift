@@ -36,7 +36,7 @@ final class FloatingPanel: NSPanel {
     }
 }
 
-class AppDelegate: NSObject, NSApplicationDelegate {
+class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var window: NSWindow!
     var floatingPanel: FloatingPanel!
     private var hotKeyRef: EventHotKeyRef?       // user-configurable, default ⌥D
@@ -67,11 +67,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let hostingView = NSHostingView(rootView: content)
         hostingView.appearance = NSAppearance(named: palette.appearance)
         window.contentView = hostingView
+        window.delegate = self
         window.center()
         window.makeKeyAndOrderFront(nil)
 
         setupFloatingPanel()
         registerGlobalHotkey()
+        MenuBarController.shared.install()
 
         NotificationCenter.default.addObserver(
             self, selector: #selector(prepareThemeCrossFade),
@@ -137,7 +139,35 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+    /// Keep NoteFlow in the Dock when the main window is closed — standard
+    /// macOS productivity-app behaviour (close hides, Dock click reopens).
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        false
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !flag { showMainWindow() }
+        return true
+    }
+
+    /// Red traffic-light close: hide the window, don't quit the app.
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        if sender === window {
+            hideMainWindow()
+            return false
+        }
+        return true
+    }
+
+    func showMainWindow() {
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    func hideMainWindow() {
+        NoteStore.shared.flushPendingSaves()
+        window.orderOut(nil)
+    }
 
     // Persist any debounced, not-yet-written edits when the app loses focus
     // or quits, so the last keystrokes before switching away / quitting are

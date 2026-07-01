@@ -46,14 +46,15 @@ struct ContentView: View {
                         .frame(width: 1)
                 }
 
-                // Main editor area
+                // Main content area
                 Group {
                     if let note = store.activeNote {
-                        VStack(spacing: 0) {
-                            // Editor fills available space. The floating
-                            // panel uses compact margins/insets so text,
-                            // not chrome, gets the space.
-                            NoteEditorView(note: note, compact: isFloatingPanel)
+                        if note.isAPIManager {
+                            // API Key Manager page — a distinct full-space view,
+                            // not the RTF editor (which assumes an rtfData body
+                            // + shared NSTextStorage the API page doesn't have).
+                            // Same card framing as the editor for visual parity.
+                            APIManagerView(noteId: note.id, compact: isFloatingPanel)
                                 .id(note.id)
                                 .environmentObject(store)
                                 .background(theme.palette.editorBackground)
@@ -61,18 +62,34 @@ struct ContentView: View {
                                 .padding(.top, isFloatingPanel ? 6 : 12)
                                 .padding(.leading, isFloatingPanel ? 8 : 0)
                                 .padding(.trailing, isFloatingPanel ? 8 : 16)
-                                .padding(.bottom, windowState.formattingVisible ? 0 : (isFloatingPanel ? 8 : 16))
+                                .padding(.bottom, isFloatingPanel ? 8 : 16)
                                 .transition(.opacity)
+                        } else {
+                            VStack(spacing: 0) {
+                                // Editor fills available space. The floating
+                                // panel uses compact margins/insets so text,
+                                // not chrome, gets the space.
+                                NoteEditorView(note: note, compact: isFloatingPanel)
+                                    .id(note.id)
+                                    .environmentObject(store)
+                                    .background(theme.palette.editorBackground)
+                                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                                    .padding(.top, isFloatingPanel ? 6 : 12)
+                                    .padding(.leading, isFloatingPanel ? 8 : 0)
+                                    .padding(.trailing, isFloatingPanel ? 8 : 16)
+                                    .padding(.bottom, windowState.formattingVisible ? 0 : (isFloatingPanel ? 8 : 16))
+                                    .transition(.opacity)
 
-                            // Formatting toolbar
-                            if windowState.formattingVisible {
-                                FormattingToolbarView()
-                                    .clipShape(
-                                        RoundedRectangle(cornerRadius: 12)
-                                    )
-                                    .padding(.horizontal, 16)
-                                    .padding(.vertical, 6)
-                                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                                // Formatting toolbar
+                                if windowState.formattingVisible {
+                                    FormattingToolbarView()
+                                        .clipShape(
+                                            RoundedRectangle(cornerRadius: 12)
+                                        )
+                                        .padding(.horizontal, 16)
+                                        .padding(.vertical, 6)
+                                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                                }
                             }
                         }
                     } else {

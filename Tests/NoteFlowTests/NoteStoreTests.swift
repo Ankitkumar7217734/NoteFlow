@@ -95,3 +95,73 @@ private func makeTempDir() throws -> URL {
     let reloaded = NoteStore(saveURL: notesURL)
     #expect(reloaded.notes.first(where: { $0.id == id })?.rtfData != nil)
 }
+
+// MARK: – Imported vertical spacing survives note-open (and clamps)
+
+// An imported note sets paragraph spacing for rhythm; reopening it from disk
+// runs sharedTextStorage -> normalizeParagraphStyles, which must preserve that
+// vertical spacing (it only flattens horizontal layout).
+@Test @MainActor func openPreservesImportedVerticalSpacing() throws {
+    let dir = try makeTempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+    let store = NoteStore(saveURL: dir.appendingPathComponent("notes.json"))
+
+    let para = NSMutableParagraphStyle()
+    para.paragraphSpacing = 6
+    para.lineSpacing = 3
+    let content = NSAttributedString(string: "hello", attributes: [
+        .font: EditorTypography.baseFont, .paragraphStyle: para
+    ])
+    let id = store.addNote(title: "t", content: content)
+
+    let storage = store.sharedTextStorage(for: id)
+    let ps = storage.attribute(.paragraphStyle, at: 0, effectiveRange: nil) as? NSParagraphStyle
+    #expect(ps?.paragraphSpacing == 6)
+    #expect(ps?.lineSpacing == 3)
+}
+
+@Test @MainActor func openClampsExcessiveVerticalSpacing() throws {
+    let dir = try makeTempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+    let store = NoteStore(saveURL: dir.appendingPathComponent("notes.json"))
+
+    let para = NSMutableParagraphStyle()
+    para.paragraphSpacing = 200   // a legacy foreign paste with absurd spacing
+    let content = NSAttributedString(string: "x", attributes: [
+        .font: EditorTypography.baseFont, .paragraphStyle: para
+    ])
+    let id = store.addNote(title: "t", content: content)
+
+    let storage = store.sharedTextStorage(for: id)
+    let ps = storage.attribute(.paragraphStyle, at: 0, effectiveRange: nil) as? NSParagraphStyle
+    #expect((ps?.paragraphSpacing ?? 0) <= 12)
+}
+
+// The paste path keeps the aggressive default (preserveVerticalSpacing: false),
+// so sanitize must still flatten paragraph spacing to zero.
+@Test @MainActor func pasteStillFlattensParagraphSpacing() {
+    let para = NSMutableParagraphStyle()
+    para.paragraphSpacing = 50
+    let src = NSAttributedString(string: "x", attributes: [
+        .font: EditorTypography.baseFont, .paragraphStyle: para
+    ])
+    let cleaned = NoteTextView.sanitize(src)
+    let ps = cleaned.attribute(.paragraphStyle, at: 0, effectiveRange: nil) as? NSParagraphStyle
+    #expect((ps?.paragraphSpacing ?? -1) == 0)
+}
+
+// An imported Markdown table must survive addNote's RTF encode + the
+// sharedTextStorage open path (decode + normalize) as a real NSTextTable,
+// with column alignment intact — otherwise it renders as flat text.
+@Test @MainActor func importedTableSurvivesOpenAsTextTable() throws {
+    let dir = try makeTempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+    let store = NoteStore(saveURL: dir.appendingPathComponent("notes.json"))
+
+    let md = "| A | B |\n| :-- | --: |\n| 1 | 2 |"
+    let id = store.addNote(title: "t", content: MarkdownParser.attributedString(from: md))
+    let storage = store.sharedTextStorage(for: id)   // RTF round-trip + normalize
+
+    #expect(NoteTextView.containsTables(storage))
+    let loc = (storage.string as NSString).range(of: "B").location
+    let ps = storage.attribute(.paragraphStyle, at: loc, effectiveRange: nil) as? NSParagraphStyle
+    #expect(ps?.textBlocks.isEmpty == false)
+    #expect(ps?.alignment == .right)   // right-aligned column preserved
+}

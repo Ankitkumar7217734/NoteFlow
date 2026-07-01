@@ -61,8 +61,10 @@ class NoteStore: ObservableObject {
                 Self.replaceThemeDefaultForegroundColors(in: mutable)
                 // Reset foreign paragraph indents/alignment baked in by old
                 // pastes so existing notes render with one straight left
-                // margin. Tables (textBlocks) are preserved.
-                Self.normalizeParagraphStyles(in: mutable)
+                // margin. Tables (textBlocks) are preserved. Vertical spacing
+                // is kept (clamped) so imported Markdown notes keep their
+                // heading / body / list rhythm across reopens.
+                Self.normalizeParagraphStyles(in: mutable, preserveVerticalSpacing: true)
                 // Collapse doubled interior spaces that make soft-wrapped
                 // lines start at uneven positions.
                 Self.normalizeWhitespace(in: mutable)
@@ -136,17 +138,41 @@ class NoteStore: ObservableObject {
     /// Table-cell membership (`textBlocks`) is preserved so tables keep
     /// their layout; the app's own lists are plain-text prefixes, so nothing
     /// else here depends on paragraph indentation.
-    static func normalizeParagraphStyles(in storage: NSMutableAttributedString) {
+    ///
+    /// `preserveVerticalSpacing` carries over *vertical* metrics
+    /// (paragraph spacing + line spacing, clamped to sane maxima) while still
+    /// flattening all horizontal layout. The misalignment bug this method
+    /// fixes is purely horizontal, so vertical rhythm is safe to keep — this
+    /// lets imported Markdown notes (which set paragraph spacing for headings
+    /// / body / lists) survive being reopened from disk. The paste path keeps
+    /// the default (`false`) so its aggressive flatten is unchanged.
+    static func normalizeParagraphStyles(in storage: NSMutableAttributedString,
+                                         preserveVerticalSpacing: Bool = false) {
         guard storage.length > 0 else { return }
         let full = NSRange(location: 0, length: storage.length)
         var replacements: [(NSRange, NSParagraphStyle)] = []
         storage.enumerateAttribute(.paragraphStyle, in: full, options: []) { value, range, _ in
             let clean = NSMutableParagraphStyle()
             clean.alignment = .natural
+            let original = value as? NSParagraphStyle
             // Keep table cells intact; drop everything else (indents, tab
-            // stops, list markers, spacing) back to the default.
-            if let original = value as? NSParagraphStyle, !original.textBlocks.isEmpty {
+            // stops, list markers, spacing) back to the default. A table
+            // cell's column alignment is part of its layout, so preserve it
+            // (only table paragraphs carry textBlocks).
+            if let original = original, !original.textBlocks.isEmpty {
                 clean.textBlocks = original.textBlocks
+                clean.alignment = original.alignment
+            }
+            // Vertical rhythm doesn't cause the horizontal misalignment this
+            // method exists to fix, so it's safe to keep. Clamp it so a
+            // legacy foreign paste with huge spacing / line-height can't
+            // produce enormous gaps. Line-height multiples / min / max are
+            // *not* carried over — they're the usual culprit and NoteFlow's
+            // own imports express spacing via lineSpacing, not line heights.
+            if preserveVerticalSpacing, let original = original {
+                clean.paragraphSpacing = min(original.paragraphSpacing, 12)
+                clean.paragraphSpacingBefore = min(original.paragraphSpacingBefore, 12)
+                clean.lineSpacing = min(original.lineSpacing, 8)
             }
             replacements.append((range, clean))
         }
@@ -209,6 +235,10 @@ class NoteStore: ObservableObject {
             result = result.filter { note in
                 if note.title.localizedCaseInsensitiveContains(query) { return true }
                 if note.tags.contains(where: { $0.localizedCaseInsensitiveContains(query) }) { return true }
+                // API pages: match provider names + key labels (never values).
+                if note.kind == .apiManager {
+                    return apiSearchText(for: note).localizedCaseInsensitiveContains(query)
+                }
                 return plainText(for: note.id).localizedCaseInsensitiveContains(query)
             }
         }
@@ -241,6 +271,9 @@ class NoteStore: ObservableObject {
         if let storage = sharedStorages[noteId] { return storage.string }
         if let cached = plainTextCache[noteId] { return cached }
         guard let note = notes.first(where: { $0.id == noteId }) else { return "" }
+        // API pages have no RTF body — don't decode/cache an empty string, and
+        // never surface key material through this text (used for row snippets).
+        if note.kind == .apiManager { return "" }
         let plain = note.attributedContent.string
         plainTextCache[noteId] = plain
         return plain
@@ -285,6 +318,144 @@ class NoteStore: ObservableObject {
         openTabIds.append(note.id)
         activeTabId = note.id
         save()
+    }
+
+    // MARK: – API Key Manager pages
+
+    /// Create a new API Key Manager page. Mirrors newNote()'s insert / open-tab
+    /// / activate / persist sequence, but the note is an auto-pinned
+    /// `.apiManager` page carrying a structured provider list instead of RTF.
+    func newAPIPage() {
+        let note = Note(apiManagerTitled: "API Keys")
+        withAnimation(.easeInOut(duration: 0.22)) {
+            notes.insert(note, at: 0)
+        }
+        openTabIds.append(note.id)
+        activeTabId = note.id
+        save()
+    }
+
+    /// All provider/key mutation funnels through here so it can't run against a
+    /// rich-text note (kind guard) and every change bumps updatedAt + persists.
+    private func mutateProviders(_ id: UUID, _ body: (inout [APIProvider]) -> Void) {
+        guard let idx = notes.firstIndex(where: { $0.id == id }),
+              notes[idx].kind == .apiManager else { return }
+        var providers = notes[idx].providers ?? []
+        body(&providers)
+        notes[idx].providers = providers
+        notes[idx].updatedAt = Date()
+        save()
+    }
+
+    /// Insert a blank provider slot the user names afterward (API page flow).
+    @discardableResult
+    func addProvider(to noteId: UUID) -> UUID? {
+        let provider = APIProvider()
+        mutateProviders(noteId) { $0.append(provider) }
+        return provider.id
+    }
+
+    func addProvider(named name: String, to noteId: UUID) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        mutateProviders(noteId) { $0.append(APIProvider(name: trimmed)) }
+    }
+
+    func renameProvider(_ providerId: UUID, to name: String, in noteId: UUID) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        mutateProviders(noteId) { providers in
+            guard let i = providers.firstIndex(where: { $0.id == providerId }) else { return }
+            providers[i].name = trimmed
+        }
+    }
+
+    func deleteProvider(_ providerId: UUID, in noteId: UUID) {
+        mutateProviders(noteId) { $0.removeAll { $0.id == providerId } }
+    }
+
+    /// Add (paste) a key under a provider. Blank values are ignored so an empty
+    /// paste field can't create a phantom key.
+    func addKey(_ value: String, label: String = "", toProvider providerId: UUID, in noteId: UUID) {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        mutateProviders(noteId) { providers in
+            guard let i = providers.firstIndex(where: { $0.id == providerId }) else { return }
+            providers[i].keys.append(APIKeyEntry(
+                label: label.trimmingCharacters(in: .whitespacesAndNewlines),
+                value: trimmed
+            ))
+        }
+    }
+
+    func updateKey(_ keyId: UUID, value: String? = nil, label: String? = nil,
+                   inProvider providerId: UUID, note noteId: UUID) {
+        mutateProviders(noteId) { providers in
+            guard let pi = providers.firstIndex(where: { $0.id == providerId }),
+                  let ki = providers[pi].keys.firstIndex(where: { $0.id == keyId }) else { return }
+            if let value = value { providers[pi].keys[ki].value = value }
+            if let label = label { providers[pi].keys[ki].label = label }
+        }
+    }
+
+    func deleteKey(_ keyId: UUID, inProvider providerId: UUID, note noteId: UUID) {
+        mutateProviders(noteId) { providers in
+            guard let pi = providers.firstIndex(where: { $0.id == providerId }) else { return }
+            providers[pi].keys.removeAll { $0.id == keyId }
+        }
+    }
+
+    /// Copy arbitrary text (an API key) to the system clipboard. Same pattern
+    /// as the editor's Copy button.
+    func copyToPasteboard(_ text: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+    }
+
+    /// Text used to match an API page against a search query: provider names +
+    /// key labels only. Key *values* are deliberately excluded so secrets never
+    /// leak into search matching or sidebar snippets.
+    func apiSearchText(for note: Note) -> String {
+        guard let providers = note.providers else { return "" }
+        var parts: [String] = []
+        for provider in providers {
+            parts.append(provider.name)
+            parts.append(contentsOf: provider.keys.map { $0.label })
+        }
+        return parts.joined(separator: " ")
+    }
+
+    /// Non-trashed API manager pages in sidebar order (newest updated first).
+    func apiManagerPages() -> [Note] {
+        notes.filter { $0.kind == .apiManager && !$0.isTrashed }
+            .sorted { $0.updatedAt > $1.updatedAt }
+    }
+
+    /// Every stored API key across all API pages — used by the menu-bar extra.
+    func allMenuBarAPIEntries() -> [MenuBarAPIEntry] {
+        var entries: [MenuBarAPIEntry] = []
+        for note in apiManagerPages() {
+            guard let providers = note.providers else { continue }
+            let pageTitle = note.title.isEmpty ? "API Keys" : note.title
+            for provider in providers {
+                let name = provider.name.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !name.isEmpty else { continue }
+                for key in provider.keys {
+                    let value = key.value.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !value.isEmpty else { continue }
+                    entries.append(MenuBarAPIEntry(
+                        keyId: key.id,
+                        providerId: provider.id,
+                        pageId: note.id,
+                        pageTitle: pageTitle,
+                        providerName: name,
+                        keyValue: value,
+                        createdAt: key.createdAt
+                    ))
+                }
+            }
+        }
+        return entries
     }
 
     func closeTab(_ id: UUID) {
@@ -436,7 +607,67 @@ class NoteStore: ObservableObject {
     /// preserving its formatting.
     func exportNote(_ id: UUID, as format: ExportFormat) {
         guard let note = notes.first(where: { $0.id == id }) else { return }
+        // API pages have no RTF body to export; the UI hides the Export menu
+        // for them, but guard here too so a stray call can't write an empty file.
+        guard note.kind == .richText else { return }
         NoteExporter.export(note: note, content: attributedContent(for: id), format: format)
+    }
+
+    /// Create a note from pre-built rich-text content: RTF-encode `content`,
+    /// insert it at the top, open it as a tab, make it active, and persist.
+    /// The general "note from existing content" primitive used by import;
+    /// the editor's shared storage decodes the RTF (and runs the usual
+    /// paragraph / whitespace / theme-color normalization) when first opened.
+    @discardableResult
+    func addNote(title: String, content: NSAttributedString) -> UUID {
+        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        var note = Note(title: trimmed.isEmpty ? "Untitled" : trimmed)
+        let full = NSRange(location: 0, length: content.length)
+        note.rtfData = try? content.data(
+            from: full,
+            documentAttributes: [.documentType: NSAttributedString.DocumentType.rtf]
+        )
+        withAnimation(.easeInOut(duration: 0.22)) {
+            notes.insert(note, at: 0)
+        }
+        openTabIds.append(note.id)
+        activeTabId = note.id
+        save()
+        return note.id
+    }
+
+    /// Show an open panel and import each selected Markdown / plain-text file
+    /// as a new note, preserving Markdown formatting. Unreadable files are
+    /// collected and surfaced afterward without aborting the rest.
+    func importFiles() {
+        // Bring the app forward so the panel is front-most even when invoked
+        // from the non-activating floating panel (same trick as the exporter).
+        NSApp.activate(ignoringOtherApps: true)
+
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = true
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowedContentTypes = ImportFormat.allowedContentTypes
+        panel.title = "Import Notes"
+        panel.prompt = "Import"
+
+        panel.begin { [self] response in
+            guard response == .OK else { return }
+            var failures: [String] = []
+            var lastImported: UUID?
+            for url in panel.urls {
+                do {
+                    let content = try NoteImporter.attributedString(forFileAt: url)
+                    let title = url.deletingPathExtension().lastPathComponent
+                    lastImported = addNote(title: title, content: content)
+                } catch {
+                    failures.append(url.lastPathComponent)
+                }
+            }
+            if let id = lastImported { activeTabId = id }
+            if !failures.isEmpty { NoteImporter.presentImportError(files: failures) }
+        }
     }
 
     func togglePin(_ id: UUID) {
