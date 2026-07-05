@@ -108,7 +108,7 @@ struct ContentView: View {
         .ignoresSafeArea(.all, edges: .top)
         .environmentObject(windowState)
         .onAppear {
-            if store.activeNote == nil { store.newNote() }
+            if store.activeNote == nil { store.newNote(userInitiated: false) }
         }
     }
 }

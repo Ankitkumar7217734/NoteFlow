@@ -20,9 +20,35 @@ struct APIKeyEntry: Identifiable, Codable, Equatable {
 /// An AI provider (e.g. "OpenRouter") holding any number of API keys.
 struct APIProvider: Identifiable, Codable, Equatable {
     var id: UUID = UUID()
+    /// Endpoint base URL for this provider (e.g. `https://api.openai.com/v1`).
+    var baseURL: String = ""
     var name: String = ""
     var keys: [APIKeyEntry] = []
     var createdAt: Date = Date()
+
+    init(id: UUID = UUID(), baseURL: String = "", name: String = "",
+         keys: [APIKeyEntry] = [], createdAt: Date = Date()) {
+        self.id = id
+        self.baseURL = baseURL
+        self.name = name
+        self.keys = keys
+        self.createdAt = createdAt
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, baseURL, name, keys, createdAt
+    }
+
+    // Older notes.json files omit `baseURL`; default to "" so the whole store
+    // still loads (without this, one legacy provider bricks every note).
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        baseURL = try c.decodeIfPresent(String.self, forKey: .baseURL) ?? ""
+        name = try c.decode(String.self, forKey: .name)
+        keys = try c.decodeIfPresent([APIKeyEntry].self, forKey: .keys) ?? []
+        createdAt = try c.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
+    }
 }
 
 struct Note: Identifiable, Codable {
@@ -43,6 +69,9 @@ struct Note: Identifiable, Codable {
     /// Structured payload for `.apiManager` pages. `nil` for RTF notes; the
     /// key is simply omitted from their JSON.
     var providers: [APIProvider]?
+    /// When false, the title is derived from the note body until the user
+    /// renames the tab themselves.
+    var titleIsManual: Bool = false
 
     var isTrashed: Bool { deletedAt != nil }
 
@@ -71,10 +100,11 @@ struct Note: Identifiable, Codable {
         self.kind = .apiManager
         self.providers = []
         self.isPinned = true
+        self.titleIsManual = true
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, title, rtfData, createdAt, updatedAt, deletedAt, isPinned, tags, kind, providers
+        case id, title, rtfData, createdAt, updatedAt, deletedAt, isPinned, tags, kind, providers, titleIsManual
     }
 
     // Custom decode so JSON files written by older versions (which lack
@@ -92,6 +122,10 @@ struct Note: Identifiable, Codable {
         tags = try c.decodeIfPresent([String].self, forKey: .tags) ?? []
         kind = try c.decodeIfPresent(NoteKind.self, forKey: .kind) ?? .richText
         providers = try c.decodeIfPresent([APIProvider].self, forKey: .providers)
+        // Notes saved before auto-titles existed: treat any non-default title
+        // as user-chosen so we don't overwrite it from the body on open.
+        titleIsManual = try c.decodeIfPresent(Bool.self, forKey: .titleIsManual)
+            ?? (!title.isEmpty && title != "Untitled")
     }
 
     var attributedContent: NSAttributedString {

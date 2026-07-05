@@ -67,6 +67,7 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<'PLIST'
     <key>NSPrincipalClass</key>               <string>NSApplication</string>
     <key>NSHighResolutionCapable</key>        <true/>
     <key>LSApplicationCategoryType</key>      <string>public.app-category.productivity</string>
+    <key>NSQuitAlwaysKeepsWindows</key>       <false/>
 </dict>
 </plist>
 PLIST

@@ -1,6 +1,6 @@
 import AppKit
 
-/// Menu-bar extra (system tray): NoteFlow logo → pinned keys, API submenu with
+/// Menu-bar extra (system tray): NoteFlow logo → pinned keys/URLs, API submenu with
 /// copy-only actions, show window, quit. Rebuilt whenever the menu opens so
 /// keys stay in sync with NoteStore.
 @MainActor
@@ -41,22 +41,29 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     @objc private func rebuildMenu() {
         menu.removeAllItems()
 
-        let entries = NoteStore.shared.allMenuBarAPIEntries()
-        let pinned = entries.filter { MenuBarPinStore.shared.isPinned(entry: $0) }
+        let keyEntries = NoteStore.shared.allMenuBarAPIEntries()
+        let urlEntries = NoteStore.shared.allMenuBarProviderEntries()
+        let pins = MenuBarPinStore.shared
 
-        if !pinned.isEmpty {
+        let pinnedURLs = urlEntries.filter { pins.isProviderPinned($0.providerId) }
+        let pinnedKeys = keyEntries.filter { pins.isPinned(entry: $0) }
+
+        if !pinnedURLs.isEmpty || !pinnedKeys.isEmpty {
             let header = NSMenuItem(title: "Pinned", action: nil, keyEquivalent: "")
             header.isEnabled = false
             menu.addItem(header)
-            for entry in pinned {
-                menu.addItem(copyItem(for: entry))
+            for entry in pinnedURLs {
+                menu.addItem(copyURLItem(for: entry, indent: false))
+            }
+            for entry in pinnedKeys {
+                menu.addItem(copyKeyItem(for: entry, indent: false))
             }
             menu.addItem(.separator())
         }
 
         let apiItem = NSMenuItem(title: "API", action: nil, keyEquivalent: "")
         let apiMenu = NSMenu()
-        populateAPIMenu(apiMenu, entries: entries)
+        populateAPIMenu(apiMenu, keyEntries: keyEntries, urlEntries: urlEntries)
         apiItem.submenu = apiMenu
         menu.addItem(apiItem)
 
@@ -79,33 +86,51 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         menu.addItem(quit)
     }
 
-    private func populateAPIMenu(_ apiMenu: NSMenu, entries: [MenuBarAPIEntry]) {
-        if entries.isEmpty {
+    private func populateAPIMenu(
+        _ apiMenu: NSMenu,
+        keyEntries: [MenuBarAPIEntry],
+        urlEntries: [MenuBarProviderEntry]
+    ) {
+        if keyEntries.isEmpty && urlEntries.isEmpty {
             let empty = NSMenuItem(title: "No API keys saved", action: nil, keyEquivalent: "")
             empty.isEnabled = false
             apiMenu.addItem(empty)
             return
         }
 
-        let byPage = Dictionary(grouping: entries, by: \.pageId)
+        let keysByPage = Dictionary(grouping: keyEntries, by: \.pageId)
+        let urlsByPage = Dictionary(grouping: urlEntries, by: \.pageId)
         let pageOrder = NoteStore.shared.apiManagerPages().map(\.id)
 
         for pageId in pageOrder {
-            guard let pageEntries = byPage[pageId], !pageEntries.isEmpty else { continue }
-            let pageTitle = pageEntries[0].pageTitle
+            let pageKeys = keysByPage[pageId] ?? []
+            let pageURLs = urlsByPage[pageId] ?? []
+            guard !pageKeys.isEmpty || !pageURLs.isEmpty else { continue }
+
+            let pageTitle = pageKeys.first?.pageTitle
+                ?? pageURLs.first?.pageTitle
+                ?? "API Keys"
 
             let pageHeader = NSMenuItem(title: pageTitle, action: nil, keyEquivalent: "")
             pageHeader.isEnabled = false
             apiMenu.addItem(pageHeader)
 
-            let byProvider = Dictionary(grouping: pageEntries, by: \.providerId)
-            let providerOrder = pageEntries.map(\.providerId).reduce(into: [UUID]()) { ids, id in
-                if !ids.contains(id) { ids.append(id) }
+            var providerIds: [UUID] = []
+            for entry in pageKeys where !providerIds.contains(entry.providerId) {
+                providerIds.append(entry.providerId)
+            }
+            for entry in pageURLs where !providerIds.contains(entry.providerId) {
+                providerIds.append(entry.providerId)
             }
 
-            for providerId in providerOrder {
-                guard let keys = byProvider[providerId], !keys.isEmpty else { continue }
-                let providerName = keys[0].providerName
+            let keysByProvider = Dictionary(grouping: pageKeys, by: \.providerId)
+            let urlsByProvider = Dictionary(uniqueKeysWithValues: pageURLs.map { ($0.providerId, $0) })
+
+            for providerId in providerIds {
+                let keys = keysByProvider[providerId] ?? []
+                let providerName = keys.first?.providerName
+                    ?? urlsByProvider[providerId]?.providerName
+                    ?? "Provider"
 
                 let providerHeader = NSMenuItem(
                     title: "  \(providerName)",
@@ -115,10 +140,12 @@ final class MenuBarController: NSObject, NSMenuDelegate {
                 providerHeader.isEnabled = false
                 apiMenu.addItem(providerHeader)
 
+                if let urlEntry = urlsByProvider[providerId] {
+                    apiMenu.addItem(copyURLItem(for: urlEntry, indent: true))
+                }
+
                 for entry in keys {
-                    let row = copyItem(for: entry)
-                    row.title = "    Copy  ·  \(entry.menuTitle)"
-                    apiMenu.addItem(row)
+                    apiMenu.addItem(copyKeyItem(for: entry, indent: true))
                 }
             }
 
@@ -130,9 +157,10 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         }
     }
 
-    private func copyItem(for entry: MenuBarAPIEntry) -> NSMenuItem {
+    private func copyKeyItem(for entry: MenuBarAPIEntry, indent: Bool) -> NSMenuItem {
+        let prefix = indent ? "    Copy key  ·  " : "Copy key  ·  "
         let item = NSMenuItem(
-            title: "Copy  ·  \(entry.menuTitle)",
+            title: prefix + entry.menuTitle,
             action: #selector(copyAPIKey(_:)),
             keyEquivalent: ""
         )
@@ -141,7 +169,24 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         return item
     }
 
+    private func copyURLItem(for entry: MenuBarProviderEntry, indent: Bool) -> NSMenuItem {
+        let prefix = indent ? "    Copy URL  ·  " : "Copy URL  ·  "
+        let item = NSMenuItem(
+            title: prefix + entry.menuTitle,
+            action: #selector(copyBaseURL(_:)),
+            keyEquivalent: ""
+        )
+        item.target = self
+        item.representedObject = entry.baseURL
+        return item
+    }
+
     @objc private func copyAPIKey(_ sender: NSMenuItem) {
+        guard let value = sender.representedObject as? String else { return }
+        NoteStore.shared.copyToPasteboard(value)
+    }
+
+    @objc private func copyBaseURL(_ sender: NSMenuItem) {
         guard let value = sender.representedObject as? String else { return }
         NoteStore.shared.copyToPasteboard(value)
     }

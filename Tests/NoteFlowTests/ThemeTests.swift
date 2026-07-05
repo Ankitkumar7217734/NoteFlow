@@ -20,11 +20,11 @@ private func contrast(_ a: NSColor, _ b: NSColor) -> CGFloat {
     return (max(la, lb) + 0.05) / (min(la, lb) + 0.05)
 }
 
-@Test func darkBodyTextSitsInComfortBand() {
+@Test func darkBodyTextHasStrongContrast() {
     let p = Palette.dark
     let ratio = contrast(p.textNS, p.editorBackgroundNS)
-    #expect(ratio >= 9 && ratio <= 16,
-            "dark body ink vs editor was \(ratio):1 — outside the 9–16:1 comfort band")
+    #expect(ratio >= 12,
+            "dark body ink vs editor was \(ratio):1 — should be high-contrast pure white")
 }
 
 @Test func lightBodyTextSitsInComfortBand() {
@@ -51,12 +51,14 @@ private func contrast(_ a: NSColor, _ b: NSColor) -> CGFloat {
 // Both the legacy defaults (pure black / 0.91 white) and the new Paper & Ink
 // defaults must be recognized as theme defaults, or text saved under one
 // theme gets stranded (possibly invisible) after a flip.
-@Test func allFourDefaultInksAreStripped() {
+@Test func allDefaultInksAreStripped() {
     let inks: [NSColor] = [
         .black,                                            // legacy light
         NSColor(white: 0.91, alpha: 1),                    // legacy dark
         Palette.light.textNS,                              // paper ink
-        Palette.dark.textNS                                // graphite ink
+        Palette.legacyDarkInkNS,                           // graphite ink (#DAD7D1)
+        Palette.midBrightDarkInkNS,                        // graphite ink (#F0EEEA)
+        Palette.dark.textNS                                // pure white (current)
     ]
     for ink in inks {
         let s = NSMutableAttributedString(string: "hello",

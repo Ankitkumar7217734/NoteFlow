@@ -243,6 +243,7 @@ struct TabChip: View {
     private func commitTitle() {
         let trimmed = editTitle.trimmingCharacters(in: .whitespaces)
         store.updateNote(id: note.id, title: trimmed.isEmpty ? "Untitled" : trimmed)
+        store.markTitleAsManual(note.id)
         isEditing = false
     }
 

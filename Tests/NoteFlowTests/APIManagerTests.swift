@@ -58,6 +58,39 @@ private func makeTempDir() throws -> URL {
     #expect(reloaded.keys.first(where: { $0.value == "sk-or-abc" })?.label == "prod")
 }
 
+@Test @MainActor func providerBaseURLPersistsThroughSaveLoad() throws {
+    let dir = try makeTempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+    let url = dir.appendingPathComponent("notes.json")
+
+    let store = NoteStore(saveURL: url)
+    store.newAPIPage()
+    let id = try #require(store.activeTabId)
+    store.addProvider(named: "OpenAI", to: id)
+    let prov = try #require(store.notes.first(where: { $0.id == id })?.providers?.first)
+    store.updateProviderBaseURL(prov.id, to: "https://api.openai.com/v1", in: id)
+
+    let reloaded = NoteStore(saveURL: url)
+    let provider = try #require(reloaded.notes.first(where: { $0.id == id })?.providers?.first)
+    #expect(provider.baseURL == "https://api.openai.com/v1")
+}
+
+@Test @MainActor func legacyProviderJSONWithoutBaseURLDecodes() throws {
+    let dir = try makeTempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+    let url = dir.appendingPathComponent("notes.json")
+
+    let legacy = """
+    [{"id":"\(UUID().uuidString)","title":"API Keys","createdAt":804592078.957198,\
+    "updatedAt":804592291.036567,"isPinned":true,"tags":[],"kind":"apiManager",\
+    "providers":[{"id":"\(UUID().uuidString)","name":"ChatGPT","keys":[],"createdAt":804592248.902}]}]
+    """
+    try Data(legacy.utf8).write(to: url)
+
+    let store = NoteStore(saveURL: url)
+    let note = try #require(store.notes.first)
+    #expect(note.kind == .apiManager)
+    #expect(store.notes.first?.providers?.first?.baseURL == "")
+}
+
 // MARK: – Key createdAt is set on paste and preserved on edit
 
 @Test @MainActor func keyCreatedAtIsSetOnPasteAndPreservedOnEdit() throws {

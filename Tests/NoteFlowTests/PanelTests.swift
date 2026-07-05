@@ -22,6 +22,8 @@ import AppKit
     #expect(panel.isOpaque == false, "needed for the rounded-corner mask")
     #expect(panel.isFloatingPanel)
     #expect(panel.worksWhenModal)
+    #expect(panel.isRestorable == false,
+            "session restoration must not recreate the panel on relaunch")
 }
 
 // MARK: – PanelSettings

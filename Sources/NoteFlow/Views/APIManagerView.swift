@@ -1,9 +1,8 @@
 import SwiftUI
 
 // API Key Manager — one page per `.apiManager` note. Uses the same Paper & Ink
-// palette as the rest of the app. Each provider is a vertical card: name on
-// top, keys below, + to add keys. Click "Add provider" → name the slot → add
-// keys with + inside the card.
+// palette as the rest of the app. Each provider card stacks: provider name on
+// top, base URL next, then API keys below with + to add more.
 struct APIManagerView: View {
     @EnvironmentObject var store: NoteStore
     @EnvironmentObject var theme: ThemeStore
@@ -14,38 +13,96 @@ struct APIManagerView: View {
     @State private var focusNameForProviderId: UUID?
     /// Provider id showing the paste field for a new key.
     @State private var addingKeyToProviderId: UUID?
+    @State private var searchText = ""
+    @FocusState private var searchFocused: Bool
 
     private var note: Note {
         store.notes.first(where: { $0.id == noteId }) ?? Note(id: noteId)
     }
     private var providers: [APIProvider] { note.providers ?? [] }
 
-    var body: some View {
-        ScrollView {
-            VStack(spacing: 12) {
-                ForEach(providers) { provider in
-                    ProviderCard(
-                        noteId: noteId,
-                        provider: provider,
-                        compact: compact,
-                        autoFocusName: focusNameForProviderId == provider.id,
-                        isAddingKey: addingKeyToProviderId == provider.id,
-                        onNameFocused: { focusNameForProviderId = nil },
-                        onBeginAddKey: {
-                            addingKeyToProviderId = provider.id
-                            focusNameForProviderId = nil
-                        },
-                        onEndAddKey: { addingKeyToProviderId = nil }
-                    )
-                    .id(provider.id)
-                }
+    private var trimmedSearch: String {
+        searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
 
-                AddProviderCard(compact: compact, onAdd: createProvider)
+    /// Provider names, base URLs, and key labels — never secret values.
+    private var filteredProviders: [APIProvider] {
+        let query = trimmedSearch
+        guard !query.isEmpty else { return providers }
+        return providers.filter { provider in
+            provider.name.localizedCaseInsensitiveContains(query)
+                || provider.baseURL.localizedCaseInsensitiveContains(query)
+                || provider.keys.contains { $0.label.localizedCaseInsensitiveContains(query) }
+        }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            searchBar
+            ScrollView {
+                VStack(spacing: 12) {
+                    if !trimmedSearch.isEmpty && filteredProviders.isEmpty {
+                        Text("No providers match “\(trimmedSearch)”.")
+                            .font(.system(size: 13))
+                            .foregroundColor(theme.palette.secondaryText)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.top, 4)
+                    }
+
+                    ForEach(filteredProviders) { provider in
+                        ProviderCard(
+                            noteId: noteId,
+                            provider: provider,
+                            compact: compact,
+                            autoFocusName: focusNameForProviderId == provider.id,
+                            isAddingKey: addingKeyToProviderId == provider.id,
+                            onNameFocused: { focusNameForProviderId = nil },
+                            onBeginAddKey: {
+                                addingKeyToProviderId = provider.id
+                                focusNameForProviderId = nil
+                            },
+                            onEndAddKey: { addingKeyToProviderId = nil }
+                        )
+                        .id(provider.id)
+                    }
+
+                    if trimmedSearch.isEmpty {
+                        AddProviderCard(compact: compact, onAdd: createProvider)
+                    }
+                }
+                .padding(.horizontal, compact ? 14 : 24)
+                .padding(.vertical, compact ? 14 : 20)
             }
-            .padding(.horizontal, compact ? 14 : 24)
-            .padding(.vertical, compact ? 14 : 20)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+    }
+
+    private var searchBar: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 13))
+                .foregroundColor(theme.palette.iconColorDim)
+            TextField("Search providers…", text: $searchText)
+                .textFieldStyle(.plain)
+                .font(.system(size: 13))
+                .foregroundColor(theme.palette.text)
+                .focused($searchFocused)
+            if !searchText.isEmpty {
+                Button {
+                    searchText = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundColor(theme.palette.iconColorDim)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(theme.palette.searchFieldBackground, in: RoundedRectangle(cornerRadius: 8))
+        .padding(.horizontal, compact ? 14 : 24)
+        .padding(.top, compact ? 14 : 20)
+        .padding(.bottom, 8)
     }
 
     private func createProvider() {
@@ -74,10 +131,13 @@ private struct ProviderCard: View {
     let onEndAddKey: () -> Void
 
     @State private var draftName = ""
+    @State private var draftBaseURL = ""
     @State private var draftKey = ""
     @State private var isEditingName = false
     @State private var confirmingDelete = false
+    @State private var urlCopied = false
     @FocusState private var nameFocused: Bool
+    @FocusState private var baseURLFocused: Bool
     @FocusState private var keyFocused: Bool
 
     private var isUnnamed: Bool { provider.name.trimmingCharacters(in: .whitespaces).isEmpty }
@@ -86,6 +146,10 @@ private struct ProviderCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
+            Rectangle()
+                .fill(theme.palette.dividerColor)
+                .frame(height: 1)
+            baseURLSection
             Rectangle()
                 .fill(theme.palette.dividerColor)
                 .frame(height: 1)
@@ -98,8 +162,12 @@ private struct ProviderCard: View {
         )
         .onAppear {
             draftName = provider.name
+            draftBaseURL = provider.baseURL
             if isUnnamed { isEditingName = true }
             if autoFocusName { focusNameField() }
+        }
+        .onChange(of: provider.baseURL) { _, new in
+            if !baseURLFocused { draftBaseURL = new }
         }
         .onChange(of: autoFocusName) { _, shouldFocus in
             guard shouldFocus else { return }
@@ -200,11 +268,62 @@ private struct ProviderCard: View {
         }
     }
 
+    // Base URL — below the provider name.
+    private var baseURLSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Base URL")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundColor(theme.palette.secondaryText)
+
+            HStack(spacing: 8) {
+                TextField("https://api.example.com/v1", text: $draftBaseURL)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 13, design: .monospaced))
+                    .foregroundColor(theme.palette.text)
+                    .focused($baseURLFocused)
+                    .onSubmit(commitBaseURL)
+                    .onChange(of: baseURLFocused) { _, focused in
+                        if !focused { commitBaseURL() }
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
+                    .background(theme.palette.searchFieldBackground, in: RoundedRectangle(cornerRadius: 8))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(theme.palette.dividerColor, lineWidth: 1)
+                    )
+
+                Button(action: copyBaseURL) {
+                    HStack(spacing: 6) {
+                        Image(systemName: urlCopied ? "checkmark" : "doc.on.doc")
+                            .font(.system(size: 12))
+                        Text(urlCopied ? "Copied" : "Copy")
+                            .font(.system(size: 13, weight: .medium))
+                    }
+                    .foregroundColor(theme.palette.copyButtonText)
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 6)
+                    .background(theme.palette.copyButtonBackground, in: Capsule())
+                }
+                .buttonStyle(.plain)
+                .disabled(trimmedDraftBaseURL.isEmpty)
+                .opacity(trimmedDraftBaseURL.isEmpty ? 0.35 : 1)
+                .help("Copy base URL")
+            }
+        }
+        .padding(.horizontal, compact ? 12 : 16)
+        .padding(.vertical, 12)
+    }
+
+    private var trimmedDraftBaseURL: String {
+        draftBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     // API keys — bottom of the card.
     private var keysSection: some View {
         VStack(alignment: .leading, spacing: 10) {
             if isUnnamed {
-                Text("Enter a provider name above, then press Return or ✓.")
+                Text("Enter a provider name, then press Return or ✓.")
                     .font(.system(size: 12))
                     .foregroundColor(theme.palette.secondaryText)
             } else if provider.keys.isEmpty && !isAddingKey {
@@ -296,6 +415,23 @@ private struct ProviderCard: View {
         draftName = provider.name
         isEditingName = true
         focusNameField()
+    }
+
+    private func commitBaseURL() {
+        let trimmed = trimmedDraftBaseURL
+        guard trimmed != provider.baseURL else { return }
+        store.updateProviderBaseURL(provider.id, to: trimmed, in: noteId)
+    }
+
+    private func copyBaseURL() {
+        commitBaseURL()
+        let url = trimmedDraftBaseURL
+        guard !url.isEmpty else { return }
+        store.copyToPasteboard(url)
+        withAnimation { urlCopied = true }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+            withAnimation { urlCopied = false }
+        }
     }
 
     private func saveName() {

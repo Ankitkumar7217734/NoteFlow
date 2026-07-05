@@ -54,6 +54,25 @@ private func isolatedPinDefaults() -> (UserDefaults, String) {
     #expect(entries.contains { $0.providerName == "OpenAI" && $0.keyValue == "sk-oai-1" })
 }
 
+@Test @MainActor func allMenuBarProviderEntriesListsBaseURLs() throws {
+    let dir = FileManager.default.temporaryDirectory
+        .appendingPathComponent("MenuBarURLTests-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: dir) }
+
+    let store = NoteStore(saveURL: dir.appendingPathComponent("notes.json"))
+    store.newAPIPage()
+    let pageId = try #require(store.activeTabId)
+    store.addProvider(named: "OpenAI", to: pageId)
+    let provider = try #require(store.notes.first(where: { $0.id == pageId })?.providers?.first)
+    store.updateProviderBaseURL(provider.id, to: "https://api.openai.com/v1", in: pageId)
+
+    let entries = store.allMenuBarProviderEntries()
+    #expect(entries.count == 1)
+    #expect(entries.first?.providerName == "OpenAI")
+    #expect(entries.first?.baseURL == "https://api.openai.com/v1")
+}
+
 @Test @MainActor func menuBarEntryMaskShowsRecognizableSuffix() {
     let entry = MenuBarAPIEntry(
         keyId: UUID(),

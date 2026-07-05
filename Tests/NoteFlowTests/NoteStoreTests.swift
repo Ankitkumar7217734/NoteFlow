@@ -165,3 +165,124 @@ private func makeTempDir() throws -> URL {
     #expect(ps?.textBlocks.isEmpty == false)
     #expect(ps?.alignment == .right)   // right-aligned column preserved
 }
+
+// MARK: – Empty session notes on quit
+
+@Test @MainActor func emptyUserCreatedNotePurgedOnQuit() throws {
+    let dir = try makeTempDir()
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let notesURL = dir.appendingPathComponent("notes.json")
+
+    let store = NoteStore(saveURL: notesURL)
+    let bootstrapId = try #require(store.notes.first?.id)
+    store.newNote()
+    let emptyId = try #require(store.activeTabId)
+    #expect(emptyId != bootstrapId)
+
+    store.purgeUnusedSessionNotesOnQuit()
+
+    #expect(store.notes.contains(where: { $0.id == bootstrapId }))
+    #expect(!store.notes.contains(where: { $0.id == emptyId }))
+}
+
+@Test @MainActor func noteWithBodyTextSurvivesQuitPurge() throws {
+    let dir = try makeTempDir()
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let notesURL = dir.appendingPathComponent("notes.json")
+
+    let store = NoteStore(saveURL: notesURL)
+    store.newNote()
+    let id = try #require(store.activeTabId)
+    let storage = store.sharedTextStorage(for: id)
+    storage.replaceCharacters(in: NSRange(location: 0, length: 0), with: "draft")
+    store.noteBodyDidChange(id)
+    store.flushPendingSaves()
+
+    store.purgeUnusedSessionNotesOnQuit()
+
+    #expect(store.notes.contains(where: { $0.id == id }))
+    #expect(store.plainText(for: id) == "draft")
+}
+
+@Test @MainActor func emptyUserCreatedNoteKeptWhileAppOpen() throws {
+    let dir = try makeTempDir()
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let notesURL = dir.appendingPathComponent("notes.json")
+
+    let store = NoteStore(saveURL: notesURL)
+    store.newNote()
+    let id = try #require(store.activeTabId)
+    #expect(store.isNoteBodyEmpty(id))
+
+    // No purge call — simulates the app staying open.
+    #expect(store.notes.contains(where: { $0.id == id }))
+}
+
+@Test @MainActor func bootstrapNoteNotPurgedOnQuit() throws {
+    let dir = try makeTempDir()
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let notesURL = dir.appendingPathComponent("notes.json")
+
+    let store = NoteStore(saveURL: notesURL)
+    let id = try #require(store.notes.first?.id)
+    #expect(store.isNoteBodyEmpty(id))
+
+    store.purgeUnusedSessionNotesOnQuit()
+
+    #expect(store.notes.contains(where: { $0.id == id }))
+}
+
+// MARK: – Auto title from body
+
+@Test func autoTitleUsesFirstNonEmptyLine() {
+    #expect(NoteStore.autoTitle(from: "Groceries\nmilk") == "Groceries")
+    #expect(NoteStore.autoTitle(from: "\n\n  Meeting notes  \n") == "Meeting notes")
+}
+
+@Test func autoTitleStripsListMarkers() {
+    #expect(NoteStore.autoTitle(from: "• Buy eggs") == "Buy eggs")
+    #expect(NoteStore.autoTitle(from: "1. First item") == "First item")
+    #expect(NoteStore.autoTitle(from: "# Heading") == "Heading")
+}
+
+@Test func autoTitleLimitsToThreeWords() {
+    let long = "one two three four five six seven eight nine ten"
+    #expect(NoteStore.autoTitle(from: long) == "one two three")
+    #expect(NoteStore.autoTitle(from: "alpha beta") == "alpha beta")
+    #expect(NoteStore.autoTitle(from: "solo") == "solo")
+}
+
+@Test @MainActor func untitledNotePicksUpTitleFromBody() throws {
+    let dir = try makeTempDir()
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let notesURL = dir.appendingPathComponent("notes.json")
+
+    let store = NoteStore(saveURL: notesURL)
+    store.newNote()
+    let id = try #require(store.activeTabId)
+    #expect(store.notes.first(where: { $0.id == id })?.title == "Untitled")
+
+    let storage = store.sharedTextStorage(for: id)
+    storage.replaceCharacters(in: NSRange(location: 0, length: 0), with: "Project roadmap")
+    store.noteBodyDidChange(id)
+
+    #expect(store.notes.first(where: { $0.id == id })?.title == "Project roadmap")
+}
+
+@Test @MainActor func manualTitleIsNotOverwrittenByBody() throws {
+    let dir = try makeTempDir()
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let notesURL = dir.appendingPathComponent("notes.json")
+
+    let store = NoteStore(saveURL: notesURL)
+    store.newNote()
+    let id = try #require(store.activeTabId)
+    store.updateNote(id: id, title: "My Custom Name")
+    store.markTitleAsManual(id)
+
+    let storage = store.sharedTextStorage(for: id)
+    storage.replaceCharacters(in: NSRange(location: 0, length: 0), with: "Different body text")
+    store.noteBodyDidChange(id)
+
+    #expect(store.notes.first(where: { $0.id == id })?.title == "My Custom Name")
+}

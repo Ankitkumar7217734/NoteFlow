@@ -66,6 +66,20 @@ final class MenuBarPinStore: ObservableObject {
     }
 }
 
+/// One copyable provider base URL for the menu bar.
+struct MenuBarProviderEntry: Equatable, Identifiable {
+    var id: UUID { providerId }
+    let providerId: UUID
+    let pageId: UUID
+    let pageTitle: String
+    let providerName: String
+    let baseURL: String
+
+    var menuTitle: String {
+        "\(providerName)  ·  \(baseURL)"
+    }
+}
+
 /// One copyable API key row for the menu bar (built from all `.apiManager` pages).
 struct MenuBarAPIEntry: Equatable, Identifiable {
     var id: UUID { keyId }

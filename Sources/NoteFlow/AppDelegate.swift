@@ -33,6 +33,9 @@ final class FloatingPanel: NSPanel {
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         hidesOnDeactivate = false
         worksWhenModal = true
+        // Managed entirely by AppDelegate.toggleFloating — never autosaved by
+        // macOS session restoration (see AppDelegate shouldRestoreApplicationState).
+        isRestorable = false
     }
 }
 
@@ -43,6 +46,37 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var globalHotKeyRef: EventHotKeyRef? // fixed ⌃⇧D
     // Track the app that was active before the floating panel opened so we can restore it.
     private var previousApp: NSRunningApplication?
+
+    /// NoteFlow creates and owns its windows in code (main window + floating
+    /// panel). Letting macOS save/restore window state — which happens when
+    /// the app is still running across a system restart — fights that setup
+    /// and can crash during relaunch ("unexpectedly quit while reopening
+    /// windows"). We persist note data ourselves; window frames live in
+    /// PanelSettings / manual layout instead.
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        UserDefaults.standard.register(defaults: ["NSQuitAlwaysKeepsWindows": false])
+        discardStaleSavedApplicationState()
+    }
+
+    /// Remove macOS session-restoration snapshots. We opt out of restoration
+    /// entirely, and a leftover `.savedState` folder from an older build can
+    /// keep triggering the "Reopen windows?" dialog after a system restart.
+    private func discardStaleSavedApplicationState() {
+        guard let bundleID = Bundle.main.bundleIdentifier else { return }
+        let url = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Saved Application State/\(bundleID).savedState")
+        try? FileManager.default.removeItem(at: url)
+    }
+
+    func application(_ application: NSApplication,
+                     shouldSaveApplicationState coder: NSCoder) -> Bool {
+        false
+    }
+
+    func application(_ application: NSApplication,
+                     shouldRestoreApplicationState coder: NSCoder) -> Bool {
+        false
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
@@ -68,6 +102,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         hostingView.appearance = NSAppearance(named: palette.appearance)
         window.contentView = hostingView
         window.delegate = self
+        window.isRestorable = false
         window.center()
         window.makeKeyAndOrderFront(nil)
 
@@ -178,6 +213,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         NoteStore.shared.flushPendingSaves()
+        NoteStore.shared.purgeUnusedSessionNotesOnQuit()
     }
 
     // Install the pre-processed logo (cropped + rounded) as the Dock icon.

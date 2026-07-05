@@ -49,12 +49,14 @@ struct Palette {
     // NoteStore.themeDefaultColors (strip-on-load matching), the dynamic
     // color below resolves between them per appearance.
     static let lightInkNS = NSColor(red: 0.173, green: 0.165, blue: 0.149, alpha: 1)  // #2C2A26
-    static let darkInkNS  = NSColor(red: 0.855, green: 0.843, blue: 0.820, alpha: 1)  // #DAD7D1
+    static let darkInkNS  = NSColor.white                                              // #FFFFFF
+    /// Previous dark inks — kept in `NoteStore.themeDefaultColors` so saved notes
+    /// with an older default still strip correctly on theme flip.
+    static let midBrightDarkInkNS = NSColor(red: 0.941, green: 0.933, blue: 0.918, alpha: 1)  // #F0EEEA
+    static let legacyDarkInkNS = NSColor(red: 0.855, green: 0.843, blue: 0.820, alpha: 1)  // #DAD7D1
 
-    /// The editor's default text color. Behaves like NSColor.textColor —
-    /// resolves per the view's effective appearance — but to NoteFlow's
-    /// warm inks instead of pure black / near-white, keeping long-form
-    /// contrast in the comfortable 9–16:1 band.
+    /// The editor's default text color. Resolves per the view's effective
+    /// appearance — warm near-black in light mode, pure white in dark mode.
     static let dynamicInkNS = NSColor(name: nil) { appearance in
         appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? darkInkNS : lightInkNS
     }
@@ -88,23 +90,22 @@ struct Palette {
     )
 
     // Dark — "warm graphite": layered surfaces (chrome #151412, editor
-    // lifted to #1D1C19 so content sits forward), soft warm-white ink.
-    // Body contrast ≈ 11.9:1 — readable without the halation of pure
-    // white on #000000.
+    // lifted to #1D1C19 so content sits forward), pure-white body ink for
+    // maximum separation from the warm gray surfaces.
     static let dark = Palette(
         chromeBackground: Color(red: 0.082, green: 0.078, blue: 0.071),
         editorBackground: Color(red: 0.114, green: 0.110, blue: 0.098),
-        text: Color(red: 0.855, green: 0.843, blue: 0.820),
+        text: .white,
         secondaryText: Color(red: 0.557, green: 0.545, blue: 0.522),
-        iconColor: Color(red: 0.761, green: 0.749, blue: 0.725),
-        iconColorDim: Color(red: 0.502, green: 0.490, blue: 0.467),
+        iconColor: .white,
+        iconColorDim: Color(red: 0.702, green: 0.690, blue: 0.667),
         activeTabBackground: Color.white.opacity(0.09),
         activeRowBackground: Color.white.opacity(0.07),
         searchFieldBackground: Color.white.opacity(0.06),
         searchHighlight: Color(red: 1.0, green: 0.72, blue: 0.30).opacity(0.30),
         dividerColor: Color(red: 0.165, green: 0.161, blue: 0.145),
         copyButtonBackground: Color.white.opacity(0.16),
-        copyButtonText: Color(red: 0.925, green: 0.918, blue: 0.902),
+        copyButtonText: .white,
         editorBackgroundNS: NSColor(red: 0.114, green: 0.110, blue: 0.098, alpha: 1),
         textNS: darkInkNS,
         chromeBackgroundNS: NSColor(red: 0.082, green: 0.078, blue: 0.071, alpha: 1),
@@ -112,7 +113,7 @@ struct Palette {
         tableBorderNS: NSColor(red: 0.227, green: 0.220, blue: 0.200, alpha: 1), // #3A3833
         tableHeaderBgNS: NSColor(red: 0.149, green: 0.145, blue: 0.122, alpha: 1), // #26251F
         selectionBackgroundNS: NSColor(red: 0.290, green: 0.471, blue: 0.761, alpha: 0.35),
-        selectedTextNS: NSColor(red: 0.925, green: 0.918, blue: 0.902, alpha: 1),
+        selectedTextNS: darkInkNS,
         appearance: .darkAqua,
         colorScheme: .dark
     )

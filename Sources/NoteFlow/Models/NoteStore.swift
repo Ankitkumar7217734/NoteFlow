@@ -44,6 +44,10 @@ class NoteStore: ObservableObject {
     // newer text is re-encoded by the next flush.
     private var editGenerations: [UUID: UInt64] = [:]
 
+    /// Rich-text notes the user created this session that still have no body
+    /// text. Purged on app quit only — kept while the app stays open.
+    private var sessionEmptyNoteIds: Set<UUID> = []
+
     func sharedTextStorage(for id: UUID) -> NSTextStorage {
         if let existing = sharedStorages[id] {
             return existing
@@ -82,7 +86,9 @@ class NoteStore: ObservableObject {
         .black,                                      // legacy light default
         NSColor(white: 0.91, alpha: 1),              // legacy dark default
         Palette.lightInkNS,                          // Paper & Ink light (#2C2A26)
-        Palette.darkInkNS                            // Paper & Ink dark (#DAD7D1)
+        Palette.legacyDarkInkNS,                     // Paper & Ink dark (#DAD7D1)
+        Palette.midBrightDarkInkNS,                  // Paper & Ink dark (#F0EEEA)
+        Palette.darkInkNS                            // Paper & Ink dark (#FFFFFF)
     ]
 
     private static func isThemeDefault(_ color: NSColor) -> Bool {
@@ -310,13 +316,16 @@ class NoteStore: ObservableObject {
         }
     }
 
-    func newNote() {
+    func newNote(userInitiated: Bool = true) {
         let note = Note()
         withAnimation(.easeInOut(duration: 0.22)) {
             notes.insert(note, at: 0)
         }
         openTabIds.append(note.id)
         activeTabId = note.id
+        if userInitiated {
+            sessionEmptyNoteIds.insert(note.id)
+        }
         save()
     }
 
@@ -367,6 +376,15 @@ class NoteStore: ObservableObject {
         mutateProviders(noteId) { providers in
             guard let i = providers.firstIndex(where: { $0.id == providerId }) else { return }
             providers[i].name = trimmed
+        }
+    }
+
+    func updateProviderBaseURL(_ providerId: UUID, to baseURL: String, in noteId: UUID) {
+        let trimmed = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        mutateProviders(noteId) { providers in
+            guard let i = providers.firstIndex(where: { $0.id == providerId }) else { return }
+            guard providers[i].baseURL != trimmed else { return }
+            providers[i].baseURL = trimmed
         }
     }
 
@@ -458,6 +476,28 @@ class NoteStore: ObservableObject {
         return entries
     }
 
+    /// Named providers with a non-empty base URL — for menu-bar URL copy actions.
+    func allMenuBarProviderEntries() -> [MenuBarProviderEntry] {
+        var entries: [MenuBarProviderEntry] = []
+        for note in apiManagerPages() {
+            guard let providers = note.providers else { continue }
+            let pageTitle = note.title.isEmpty ? "API Keys" : note.title
+            for provider in providers {
+                let name = provider.name.trimmingCharacters(in: .whitespacesAndNewlines)
+                let url = provider.baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !name.isEmpty, !url.isEmpty else { continue }
+                entries.append(MenuBarProviderEntry(
+                    providerId: provider.id,
+                    pageId: note.id,
+                    pageTitle: pageTitle,
+                    providerName: name,
+                    baseURL: url
+                ))
+            }
+        }
+        return entries
+    }
+
     func closeTab(_ id: UUID) {
         openTabIds.removeAll { $0 == id }
         if activeTabId == id {
@@ -486,10 +526,72 @@ class NoteStore: ObservableObject {
         save()
     }
 
+    /// Stop auto-deriving the title from body text (called when the user
+    /// renames a tab).
+    func markTitleAsManual(_ id: UUID) {
+        guard let idx = notes.firstIndex(where: { $0.id == id }) else { return }
+        guard !notes[idx].titleIsManual else { return }
+        notes[idx].titleIsManual = true
+        save()
+    }
+
+    /// Derive a sidebar / tab title from the first non-empty body line.
+    static func autoTitle(from body: String, maxWords: Int = 3) -> String? {
+        for rawLine in body.components(separatedBy: .newlines) {
+            var line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+            if line.isEmpty { continue }
+            line = stripLeadingListMarker(from: line)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if line.isEmpty { continue }
+            return truncateAutoTitle(line, maxWords: maxWords)
+        }
+        return nil
+    }
+
+    private static func stripLeadingListMarker(from line: String) -> String {
+        var s = line
+        if s.hasPrefix("▎ ") { s = String(s.dropFirst(2)) }
+        while s.hasPrefix("#") { s.removeFirst() }
+        s = s.trimmingCharacters(in: .whitespaces)
+        for prefix in ["• ", "☐ ", "☑ ", "- ", "* "] {
+            if s.hasPrefix(prefix) { return String(s.dropFirst(prefix.count)) }
+        }
+        if s.hasPrefix("> ") { return String(s.dropFirst(2)) }
+        if let regex = try? NSRegularExpression(pattern: #"^\d+\.\s"#),
+           let match = regex.firstMatch(in: s, range: NSRange(s.startIndex..., in: s)) {
+            return (s as NSString).substring(from: match.range.length)
+        }
+        return s
+    }
+
+    private static func truncateAutoTitle(_ text: String, maxWords: Int) -> String {
+        let words = text.split(whereSeparator: \.isWhitespace).map(String.init)
+        guard !words.isEmpty else { return text.trimmingCharacters(in: .whitespacesAndNewlines) }
+        if words.count <= maxWords { return words.joined(separator: " ") }
+        return words.prefix(maxWords).joined(separator: " ")
+    }
+
+    /// Update an untitled note's name from its body. `persist: false` refreshes
+    /// the tab/sidebar live while typing; `true` writes notes.json.
+    func syncAutoTitleIfNeeded(for id: UUID, persist: Bool = true) {
+        guard let idx = notes.firstIndex(where: { $0.id == id }) else { return }
+        guard notes[idx].kind == .richText, !notes[idx].titleIsManual else { return }
+
+        let nextTitle = Self.autoTitle(from: plainText(for: id)) ?? "Untitled"
+        guard notes[idx].title != nextTitle else { return }
+        notes[idx].title = nextTitle
+        notes[idx].updatedAt = Date()
+        if persist { save() }
+    }
+
     /// Called from the editor on every keystroke. Cheap: marks the note's
     /// body dirty and (re)arms the debounce timer. The actual RTF-encode +
     /// disk write happen in flushPendingSaves() once typing pauses.
     func noteBodyDidChange(_ id: UUID) {
+        if !isNoteBodyEmpty(id) {
+            sessionEmptyNoteIds.remove(id)
+        }
+        syncAutoTitleIfNeeded(for: id, persist: false)
         pendingDirtyNoteIds.insert(id)
         editGenerations[id, default: 0] += 1
         saveDebounceTimer?.invalidate()
@@ -556,6 +658,7 @@ class NoteStore: ObservableObject {
                     if self.editGenerations[item.id] == item.generation {
                         self.pendingDirtyNoteIds.remove(item.id)
                     }
+                    self.syncAutoTitleIfNeeded(for: item.id, persist: false)
                 }
                 if didApply { self.save() }
             }
@@ -588,6 +691,7 @@ class NoteStore: ObservableObject {
             }
             notes[idx].updatedAt = now
             plainTextCache.removeValue(forKey: id)
+            syncAutoTitleIfNeeded(for: id, persist: false)
         }
         save()
     }
@@ -622,6 +726,7 @@ class NoteStore: ObservableObject {
     func addNote(title: String, content: NSAttributedString) -> UUID {
         let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
         var note = Note(title: trimmed.isEmpty ? "Untitled" : trimmed)
+        note.titleIsManual = true
         let full = NSRange(location: 0, length: content.length)
         note.rtfData = try? content.data(
             from: full,
@@ -737,10 +842,48 @@ class NoteStore: ObservableObject {
         for id in ids { permanentlyDeleteNote(id) }
     }
 
+    /// True when a rich-text note has no meaningful body content (ignoring
+    /// whitespace). Prefers the live shared storage over persisted RTF.
+    func isNoteBodyEmpty(_ id: UUID) -> Bool {
+        plainText(for: id)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .isEmpty
+    }
+
+    /// Drop user-created notes that still have no body text when the app
+    /// quits. Called after flushPendingSaves() so the final body is encoded.
+    /// Notes created at launch (bootstrap) are not tracked and are kept.
+    func purgeUnusedSessionNotesOnQuit() {
+        guard !sessionEmptyNoteIds.isEmpty else { return }
+        let toRemove = sessionEmptyNoteIds.filter { id in
+            guard let note = notes.first(where: { $0.id == id }) else { return false }
+            return note.kind == .richText && !note.isTrashed && isNoteBodyEmpty(id)
+        }
+        guard !toRemove.isEmpty else { return }
+        for id in toRemove {
+            dropNoteData(for: id)
+        }
+        notes.removeAll { toRemove.contains($0.id) }
+        openTabIds.removeAll { toRemove.contains($0) }
+        if let active = activeTabId, toRemove.contains(active) {
+            activeTabId = openTabIds.last
+        }
+        sessionEmptyNoteIds.subtract(toRemove)
+        save()
+    }
+
+    private func dropNoteData(for id: UUID) {
+        sharedStorages.removeValue(forKey: id)
+        plainTextCache.removeValue(forKey: id)
+        pendingDirtyNoteIds.remove(id)
+        editGenerations.removeValue(forKey: id)
+        sessionEmptyNoteIds.remove(id)
+    }
+
     private func load() {
         guard let data = try? Data(contentsOf: saveURL) else {
             // No store file yet (first launch) — start fresh.
-            newNote()
+            newNote(userInitiated: false)
             return
         }
         guard let decoded = try? JSONDecoder().decode([Note].self, from: data) else {
@@ -748,7 +891,7 @@ class NoteStore: ObservableObject {
             // newNote() → save() writes a fresh store, so one corrupt byte
             // can never silently erase the user's entire note history.
             backupCorruptStoreFile()
-            newNote()
+            newNote(userInitiated: false)
             return
         }
         notes = decoded
@@ -758,7 +901,7 @@ class NoteStore: ObservableObject {
             openTabIds = [firstActive.id]
             activeTabId = firstActive.id
         } else {
-            newNote()
+            newNote(userInitiated: false)
         }
     }
 
