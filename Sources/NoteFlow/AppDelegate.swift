@@ -40,12 +40,15 @@ final class FloatingPanel: NSPanel {
 }
 
 class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
-    var window: NSWindow!
+    var window: NSWindow?
     var floatingPanel: FloatingPanel!
     private var hotKeyRef: EventHotKeyRef?       // user-configurable, default ⌥D
     private var globalHotKeyRef: EventHotKeyRef? // fixed ⌃⇧D
     // Track the app that was active before the floating panel opened so we can restore it.
     private var previousApp: NSRunningApplication?
+    /// Dock click / Reopen can arrive before applicationDidFinishLaunching
+    /// finishes creating the window — defer until setup is done.
+    private var pendingShowMainWindow = false
 
     /// NoteFlow creates and owns its windows in code (main window + floating
     /// panel). Letting macOS save/restore window state — which happens when
@@ -80,31 +83,30 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
-        setDockIcon()
 
         let palette = ThemeStore.shared.palette
         let content = ContentView(inTitledWindow: true)
             .environmentObject(NoteStore.shared)
             .environmentObject(ThemeStore.shared)
 
-        window = NSWindow(
+        let mainWindow = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1280, height: 800),
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
-        window.titlebarAppearsTransparent = true
-        window.titleVisibility = .hidden
-        window.isMovableByWindowBackground = true
-        window.backgroundColor = palette.chromeBackgroundNS
-        window.appearance = NSAppearance(named: palette.appearance)
+        mainWindow.titlebarAppearsTransparent = true
+        mainWindow.titleVisibility = .hidden
+        mainWindow.isMovableByWindowBackground = true
+        mainWindow.backgroundColor = palette.chromeBackgroundNS
+        mainWindow.appearance = NSAppearance(named: palette.appearance)
         let hostingView = NSHostingView(rootView: content)
         hostingView.appearance = NSAppearance(named: palette.appearance)
-        window.contentView = hostingView
-        window.delegate = self
-        window.isRestorable = false
-        window.center()
-        window.makeKeyAndOrderFront(nil)
+        mainWindow.contentView = hostingView
+        mainWindow.delegate = self
+        mainWindow.isRestorable = false
+        mainWindow.center()
+        window = mainWindow
 
         setupFloatingPanel()
         registerGlobalHotkey()
@@ -118,6 +120,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             self, selector: #selector(applyTheme),
             name: .themeChanged, object: nil
         )
+
+        // After the window exists — reopen events can fire mid-launch.
+        setDockIcon()
+        mainWindow.makeKeyAndOrderFront(nil)
+
+        if pendingShowMainWindow {
+            pendingShowMainWindow = false
+            showMainWindow()
+        }
     }
 
     // MARK: – Theme cross-fade
@@ -154,9 +165,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     @objc private func applyTheme() {
         let palette = ThemeStore.shared.palette
         let appearance = NSAppearance(named: palette.appearance)
-        window.backgroundColor = palette.chromeBackgroundNS
-        window.appearance = appearance
-        window.contentView?.appearance = appearance
+        window?.backgroundColor = palette.chromeBackgroundNS
+        window?.appearance = appearance
+        window?.contentView?.appearance = appearance
         floatingPanel?.contentView?.appearance = appearance
 
         // Fade out the pre-flip snapshots installed by prepareThemeCrossFade.
@@ -181,7 +192,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        if !flag { showMainWindow() }
+        if !flag {
+            if window != nil {
+                showMainWindow()
+            } else {
+                pendingShowMainWindow = true
+            }
+        }
         return true
     }
 
@@ -195,13 +212,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func showMainWindow() {
+        guard let window else { return }
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
 
     func hideMainWindow() {
         NoteStore.shared.flushPendingSaves()
-        window.orderOut(nil)
+        window?.orderOut(nil)
     }
 
     // Persist any debounced, not-yet-written edits when the app loses focus
@@ -211,16 +229,32 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         NoteStore.shared.flushPendingSaves()
     }
 
+    // Belt-and-braces for external writers (the NoteFlow MCP server): the
+    // NoteStore directory watcher already picks up notes.json changes live,
+    // but re-checking on focus guarantees the store is fresh the moment the
+    // user comes back to the app, even if a watcher event was ever missed.
+    func applicationDidBecomeActive(_ notification: Notification) {
+        NoteStore.shared.reloadFromDiskIfExternallyChanged()
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         NoteStore.shared.flushPendingSaves()
         NoteStore.shared.purgeUnusedSessionNotesOnQuit()
     }
 
     // Install the pre-processed logo (cropped + rounded) as the Dock icon.
-    // Done in-process since this is a `swift run` executable with no .icns
-    // in an .app bundle — the icon is set fresh on every launch.
+    // `swift run` has no .icns in a bundle — the icon is set fresh on launch.
+    // Packaged .app builds already ship AppIcon.icns; overriding with an
+    // invalid NSImage crashes AppKit on lockFocus, so skip them.
     private func setDockIcon() {
-        NSApp.applicationIconImage = AppLogo.processed
+        guard !Bundle.main.bundlePath.hasSuffix(".app") else { return }
+
+        let image = AppLogo.processed
+        guard image.size.width > 0, image.size.height > 0,
+              image.cgImage(forProposedRect: nil, context: nil, hints: nil) != nil else {
+            return
+        }
+        NSApp.applicationIconImage = image
     }
 
     // MARK: – Floating panel
@@ -319,8 +353,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         NoteStore.shared.isFloating = false
         floatingPanel.orderOut(nil)
         previousApp = nil
-        window.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        showMainWindow()
     }
 
     private func firstTextView(in view: NSView?) -> NSTextView? {

@@ -51,7 +51,10 @@ struct APIProvider: Identifiable, Codable, Equatable {
     }
 }
 
-struct Note: Identifiable, Codable {
+// Equatable is load-bearing for MCP sync: NoteStore's three-way merge compares
+// each note against the last-synced disk snapshot to decide whether the local
+// or the external (MCP-written) version wins.
+struct Note: Identifiable, Codable, Equatable {
     var id: UUID
     var title: String
     var rtfData: Data?

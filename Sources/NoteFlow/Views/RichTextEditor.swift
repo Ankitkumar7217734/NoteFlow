@@ -647,73 +647,14 @@ struct RichTextEditor: NSViewRepresentable {
     var onTextChange: () -> Void
 
     func makeNSView(context: Context) -> NSScrollView {
-        // Build the text system bottom-up so we can plug in the shared storage.
-        let storage = NoteStore.shared.sharedTextStorage(for: noteId)
-        let layoutManager = NoteLayoutManager()
-        // NoteLayoutManager defaults to non-contiguous (viewport-bounded)
-        // layout for fast typing; notes that already contain tables keep
-        // contiguous mode, where NSTextTable rendering is reliable.
-        if NoteTextView.containsTables(storage) {
-            layoutManager.allowsNonContiguousLayout = false
-        }
-        storage.addLayoutManager(layoutManager)
-        let textContainer = NSTextContainer(size: NSSize(
-            width: 0, height: CGFloat.greatestFiniteMagnitude
-        ))
-        textContainer.widthTracksTextView = true
-        layoutManager.addTextContainer(textContainer)
-
-        let textView = NoteTextView(frame: .zero, textContainer: textContainer)
+        let (scrollView, textView) = Self.buildEditor(
+            storage: NoteStore.shared.sharedTextStorage(for: noteId),
+            compact: compact
+        )
         textView.delegate = context.coordinator
-        textView.isRichText = true
-        textView.allowsUndo = true
-        textView.usesFontPanel = true
-        textView.isAutomaticSpellingCorrectionEnabled = true
-        textView.isAutomaticTextReplacementEnabled = true
-        textView.isAutomaticLinkDetectionEnabled = true
-        textView.isAutomaticDataDetectionEnabled = true
-        let inset: CGFloat = compact ? 14 : 28
-        textView.textContainerInset = NSSize(width: inset, height: inset)
-        // IMPORTANT: don't set textView.font here — it would wipe per-run
-        // fonts (bold/italic/mono) on the existing storage.
-        //
-        // Use Palette.dynamicInkNS (a named dynamic color, same mechanism
-        // as NSColor.textColor) for both the text view's default color and
-        // for typingAttributes. It resolves to the theme's warm ink based
-        // on the text view's appearance, so on theme switch — when only
-        // appearance changes and we don't touch textColor again — default
-        // text re-renders in the new theme's ink without overwriting
-        // user-applied colors anywhere in the storage.
-        textView.textColor = Palette.dynamicInkNS
-        textView.typingAttributes = [
-            .font: EditorTypography.baseFont,
-            .foregroundColor: Palette.dynamicInkNS
-        ]
-        textView.isEditable = true
-        textView.isSelectable = true
-        textView.drawsBackground = true
-
-        let scrollView = NSScrollView()
-        scrollView.hasVerticalScroller = true
-        scrollView.hasHorizontalScroller = false
-        scrollView.autohidesScrollers = true
-        scrollView.borderType = .noBorder
-        scrollView.drawsBackground = true
-        scrollView.documentView = textView
-
-        // Apply current theme to the new text view + scroll view, then
-        // subscribe to theme changes so a Settings toggle live-updates both
-        // the main window's editor and the floating panel's editor.
-        Self.applyPalette(ThemeStore.shared.palette, to: textView, scrollView: scrollView)
         context.coordinator.textView = textView
         context.coordinator.scrollView = scrollView
         context.coordinator.startObservingTheme()
-
-        textView.minSize = NSSize(width: 0, height: 0)
-        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
-        textView.isVerticallyResizable = true
-        textView.isHorizontallyResizable = false
-        textView.autoresizingMask = [.width]
 
         // Land the cursor in the note body when this editor is created (new
         // note, note switch, launch). Otherwise the window's initial first
@@ -736,16 +677,91 @@ struct RichTextEditor: NSViewRepresentable {
         // note is bound to the same NSTextStorage in NoteStore.
     }
 
+    // Builds the complete editor text system around a note's shared storage:
+    // layout manager, container, configured NoteTextView, scroll view.
+    // Coordinator-free and static so ColorPreservationTests can pin its
+    // load-bearing invariant: constructing an editor must never rewrite
+    // colors in the storage it attaches to.
+    //
+    // IMPORTANT: nothing here may set textView.textColor (or textView.font).
+    // The storage is already attached when the view is configured, and those
+    // NSText setters apply to *every character in the storage* — setting
+    // textColor flattened all user-picked and MCP-written colors to the
+    // theme ink each time a note was opened, which is exactly the bug that
+    // made colored notes render mono-colored. Default-colored text needs no
+    // view-level color: every run carries an explicit .foregroundColor
+    // (Palette.dynamicInkNS for default ink — see
+    // NoteStore.replaceThemeDefaultForegroundColors — which re-resolves per
+    // theme via the view's appearance), and new typing gets the same ink
+    // from typingAttributes.
+    static func buildEditor(
+        storage: NSTextStorage, compact: Bool
+    ) -> (scrollView: NSScrollView, textView: NoteTextView) {
+        // Build the text system bottom-up so we can plug in the shared storage.
+        let layoutManager = NoteLayoutManager()
+        // NoteLayoutManager defaults to non-contiguous (viewport-bounded)
+        // layout for fast typing; notes that already contain tables keep
+        // contiguous mode, where NSTextTable rendering is reliable.
+        if NoteTextView.containsTables(storage) {
+            layoutManager.allowsNonContiguousLayout = false
+        }
+        storage.addLayoutManager(layoutManager)
+        let textContainer = NSTextContainer(size: NSSize(
+            width: 0, height: CGFloat.greatestFiniteMagnitude
+        ))
+        textContainer.widthTracksTextView = true
+        layoutManager.addTextContainer(textContainer)
+
+        let textView = NoteTextView(frame: .zero, textContainer: textContainer)
+        textView.isRichText = true
+        textView.allowsUndo = true
+        textView.usesFontPanel = true
+        textView.isAutomaticSpellingCorrectionEnabled = true
+        textView.isAutomaticTextReplacementEnabled = true
+        textView.isAutomaticLinkDetectionEnabled = true
+        textView.isAutomaticDataDetectionEnabled = true
+        let inset: CGFloat = compact ? 14 : 28
+        textView.textContainerInset = NSSize(width: inset, height: inset)
+        textView.typingAttributes = [
+            .font: EditorTypography.baseFont,
+            .foregroundColor: Palette.dynamicInkNS
+        ]
+        textView.isEditable = true
+        textView.isSelectable = true
+        textView.drawsBackground = true
+
+        let scrollView = NSScrollView()
+        scrollView.hasVerticalScroller = true
+        scrollView.hasHorizontalScroller = false
+        scrollView.autohidesScrollers = true
+        scrollView.borderType = .noBorder
+        scrollView.drawsBackground = true
+        scrollView.documentView = textView
+
+        // Apply current theme to the new text view + scroll view. Theme
+        // changes after construction arrive via the coordinator's
+        // themeChanged observer, which re-runs applyPalette.
+        applyPalette(ThemeStore.shared.palette, to: textView, scrollView: scrollView)
+
+        textView.minSize = NSSize(width: 0, height: 0)
+        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.autoresizingMask = [.width]
+
+        return (scrollView, textView)
+    }
+
     // Push the palette's editor colors onto an NSTextView + its scroll view.
     // Used at construction and on every themeChanged notification.
     //
     // IMPORTANT: this method must not write to textView.textColor — that
     // setter replaces the .foregroundColor of every character in the
-    // storage and wipes out user-picked colors from the formatting
-    // toolbar. textColor is set once in makeNSView using NSColor.textColor
-    // (a semantic system color that auto-adapts to textView.appearance);
-    // changing the appearance below is enough to re-render default-color
-    // text in the new theme.
+    // storage and wipes out user-picked / MCP-written colors. (It isn't set
+    // anywhere anymore, buildEditor included — see the invariant there.)
+    // Default-ink text carries Palette.dynamicInkNS as an explicit
+    // attribute, so changing the appearance below is enough to re-render it
+    // in the new theme.
     static func applyPalette(_ palette: Palette, to textView: NSTextView, scrollView: NSScrollView) {
         textView.backgroundColor = palette.editorBackgroundNS
         textView.insertionPointColor = palette.textNS

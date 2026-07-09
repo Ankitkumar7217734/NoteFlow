@@ -10,8 +10,35 @@ import AppKit
 enum AppLogo {
     static let processed: NSImage = makeProcessed()
 
+    /// Resolve `logo.png` without touching `Bundle.module`, whose generated
+    /// accessor calls `fatalError` when the resource bundle is missing. Packaged
+    /// `.app` builds must place `NoteFlow_NoteFlow.bundle` under `Contents/`
+    /// (SwiftPM layout); older DMG scripts copied it into `Resources/` instead.
+    private static func logoResourceURL() -> URL? {
+        let bundleName = "NoteFlow_NoteFlow.bundle"
+        let candidates: [URL] = [
+            Bundle.main.bundleURL.appendingPathComponent(bundleName),
+            // Packaged .app: make-dmg.sh copies the bundle to Contents/.
+            Bundle.main.bundleURL
+                .appendingPathComponent("Contents")
+                .appendingPathComponent(bundleName),
+            Bundle.main.resourceURL?.appendingPathComponent(bundleName),
+            Bundle.main.executableURL?
+                .deletingLastPathComponent()
+                .appendingPathComponent(bundleName),
+        ].compactMap { $0 }
+
+        for base in candidates {
+            let logoURL = base.appendingPathComponent("logo.png")
+            if FileManager.default.fileExists(atPath: logoURL.path) {
+                return logoURL
+            }
+        }
+        return nil
+    }
+
     private static func makeProcessed() -> NSImage {
-        guard let url = Bundle.module.url(forResource: "logo", withExtension: "png"),
+        guard let url = logoResourceURL(),
               let raw = NSImage(contentsOf: url),
               let cgImage = raw.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
             return NSImage()

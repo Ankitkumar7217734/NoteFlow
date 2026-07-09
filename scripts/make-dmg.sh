@@ -25,9 +25,10 @@ mkdir -p "$APP_BUNDLE/Contents/MacOS"
 mkdir -p "$APP_BUNDLE/Contents/Resources"
 cp ".build/release/NoteFlow" "$APP_BUNDLE/Contents/MacOS/NoteFlow"
 
-# Bundle.module looks here when the executable lives inside a .app
+# SwiftPM's Bundle.module looks next to the .app Contents folder, not inside
+# Resources — see resource_bundle_accessor.swift in the build output.
 if [ -d ".build/release/NoteFlow_NoteFlow.bundle" ]; then
-    cp -R ".build/release/NoteFlow_NoteFlow.bundle" "$APP_BUNDLE/Contents/Resources/"
+    cp -R ".build/release/NoteFlow_NoteFlow.bundle" "$APP_BUNDLE/Contents/"
 fi
 
 echo ">> Generating AppIcon.icns..."

@@ -1,6 +1,7 @@
 import Foundation
 import SwiftUI
 import AppKit
+import CryptoKit
 
 class NoteStore: ObservableObject {
     static let shared = NoteStore()
@@ -47,6 +48,201 @@ class NoteStore: ObservableObject {
     /// Rich-text notes the user created this session that still have no body
     /// text. Purged on app quit only — kept while the app stays open.
     private var sessionEmptyNoteIds: Set<UUID> = []
+
+    // MARK: – External change sync (MCP server / other notes.json writers)
+
+    // SHA-256 of the notes.json bytes this store has already accounted for —
+    // either because we wrote them (save) or because we merged them in
+    // (reloadFromDiskIfExternallyChanged / load). Any on-disk content whose
+    // hash differs was written by another process (the NoteFlow MCP server,
+    // a hand edit, …) and must be merged before we read stale state or
+    // clobber it with our own write.
+    private var lastAccountedDiskHash: Data?
+    // Per-note snapshot of the last disk state this store accounted for —
+    // the "base" of the three-way merge in applyExternalNotes. Comparing
+    // local and disk against it tells "changed locally", "changed
+    // externally", and "changed in both" apart, so an external write can
+    // never silently undo a local edit (or vice versa).
+    private var lastSyncedNotes: [UUID: Note] = [:]
+    private var storeDirectoryWatcher: DispatchSourceFileSystemObject?
+    private var externalReloadWorkItem: DispatchWorkItem?
+    private let fileWatchQueue = DispatchQueue(label: "com.noteflow.file-watch", qos: .utility)
+
+    deinit {
+        storeDirectoryWatcher?.cancel()
+    }
+
+    private static func contentHash(of data: Data) -> Data {
+        Data(SHA256.hash(data: data))
+    }
+
+    /// Watch the directory containing notes.json for writes. We watch the
+    /// *directory*, not the file: external writers (the MCP server included)
+    /// replace the file via temp-file + rename, which would orphan a
+    /// file-descriptor watch on the old inode after the first write.
+    private func startWatchingStoreDirectory() {
+        let dirPath = saveURL.deletingLastPathComponent().path
+        let fd = open(dirPath, O_EVTONLY)
+        guard fd >= 0 else { return }
+        let source = DispatchSource.makeFileSystemObjectSource(
+            fileDescriptor: fd, eventMask: .write, queue: fileWatchQueue
+        )
+        source.setEventHandler { [weak self] in
+            self?.scheduleExternalReload()
+        }
+        source.setCancelHandler { close(fd) }
+        source.resume()
+        storeDirectoryWatcher = source
+    }
+
+    /// Debounced hop to the main thread. A temp-file + rename write fires
+    /// several directory events back-to-back; coalescing them also gives the
+    /// writer time to finish before we read.
+    private func scheduleExternalReload() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.externalReloadWorkItem?.cancel()
+            let work = DispatchWorkItem { [weak self] in
+                self?.reloadFromDiskIfExternallyChanged()
+            }
+            self.externalReloadWorkItem = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: work)
+        }
+    }
+
+    /// Re-read notes.json and fold in any changes made by another process
+    /// (the NoteFlow MCP server, a hand edit, …). No-ops when the on-disk
+    /// bytes are the ones this store already wrote or merged, so the app's
+    /// own saves never trigger a reload loop. Returns true when a merge ran.
+    ///
+    /// Main-thread only (mutates @Published state and NSTextStorage).
+    @discardableResult
+    func reloadFromDiskIfExternallyChanged() -> Bool {
+        guard let data = try? Data(contentsOf: saveURL) else { return false }
+        let hash = Self.contentHash(of: data)
+        guard hash != lastAccountedDiskHash else { return false }
+        guard let diskNotes = try? JSONDecoder().decode([Note].self, from: data) else {
+            // Partially written / invalid external content. Don't merge and
+            // don't mark it accounted — we'll retry on the next event, and a
+            // later save() simply rewrites a good store.
+            return false
+        }
+        applyExternalNotes(diskNotes)
+        lastAccountedDiskHash = hash
+        return true
+    }
+
+    /// Three-way merge of externally written notes into memory, using
+    /// `lastSyncedNotes` as the base:
+    /// - a note the user is mid-edit on (unflushed keystrokes) keeps its
+    ///   local version — the debounce flush persists it moments later;
+    /// - a note only the external writer touched takes the disk version,
+    ///   refreshing its live shared NSTextStorage so open editors re-render
+    ///   immediately;
+    /// - a note only changed locally (e.g. a rename racing the debounced
+    ///   watcher inside save()) keeps the local version;
+    /// - changed in both → newer `updatedAt` wins;
+    /// - notes that exist only in memory are kept (never destructive) and
+    ///   get re-persisted by the next save.
+    private func applyExternalNotes(_ diskNotes: [Note]) {
+        let localById = Dictionary(uniqueKeysWithValues: notes.map { ($0.id, $0) })
+        let diskIds = Set(diskNotes.map { $0.id })
+
+        var merged: [Note] = []
+        merged.reserveCapacity(diskNotes.count)
+        for diskNote in diskNotes {
+            let local = localById[diskNote.id]
+            // On disk + in the sync base, but gone from memory ⇒ the user
+            // permanently deleted it this session (and this merge is running
+            // inside the save() that persists that deletion). Don't
+            // resurrect it — unless the external writer also changed it
+            // since the base, in which case keeping it is the safe call.
+            if local == nil, let base = lastSyncedNotes[diskNote.id], diskNote == base {
+                continue
+            }
+            let winner = resolvedNote(disk: diskNote, local: local)
+            merged.append(winner)
+            if winner.rtfData == diskNote.rtfData,
+               let local, local.rtfData != diskNote.rtfData {
+                refreshLiveContent(for: winner)
+            }
+        }
+        let localOnly = notes.filter { !diskIds.contains($0.id) }
+        merged.insert(contentsOf: localOnly, at: 0)
+
+        withAnimation(.easeInOut(duration: 0.22)) {
+            notes = merged
+        }
+
+        // Tab hygiene: drop tabs whose notes vanished or were trashed
+        // externally, and make sure something sensible stays active.
+        openTabIds.removeAll { id in
+            guard let note = notes.first(where: { $0.id == id }) else { return true }
+            return note.isTrashed
+        }
+        if openTabIds.isEmpty, let first = notes.first(where: { !$0.isTrashed }) {
+            openTabIds = [first.id]
+        }
+        if activeTabId == nil || !openTabIds.contains(activeTabId!) {
+            activeTabId = openTabIds.last
+        }
+
+        recordSyncedSnapshot()
+    }
+
+    /// Pick the surviving version of one note during an external merge.
+    private func resolvedNote(disk: Note, local: Note?) -> Note {
+        guard let local = local else { return disk }
+        // Unflushed keystrokes: the live NSTextStorage (not disk, not the
+        // stale local.rtfData) is the source of truth — keep local; the
+        // debounce flush re-encodes and persists it.
+        if pendingDirtyNoteIds.contains(disk.id) { return local }
+        let base = lastSyncedNotes[disk.id]
+        let localChanged = base == nil ? false : local != base
+        let diskChanged = base == nil ? true : disk != base
+        switch (localChanged, diskChanged) {
+        case (false, _): return disk          // only external edits (or none)
+        case (true, false): return local      // only local edits
+        case (true, true):                    // both — newer edit wins
+            return disk.updatedAt >= local.updatedAt ? disk : local
+        }
+    }
+
+    /// Remember the current in-memory notes as the last-synced base for the
+    /// next external merge. Called whenever memory and disk are in agreement
+    /// (after load, save, and every external merge).
+    private func recordSyncedSnapshot() {
+        lastSyncedNotes = Dictionary(uniqueKeysWithValues: notes.map { ($0.id, $0) })
+    }
+
+    /// Push an externally updated note's body into its live shared
+    /// NSTextStorage (if one exists), running the same normalization pipeline
+    /// as sharedTextStorage(for:) so MCP-written RTF obeys theming and layout
+    /// rules. Every attached editor (main window + floating panel) re-renders
+    /// instantly; the caret is restored clamped so typing isn't derailed.
+    private func refreshLiveContent(for note: Note) {
+        plainTextCache.removeValue(forKey: note.id)
+        guard let storage = sharedStorages[note.id] else { return }
+
+        let mutable = NSMutableAttributedString(attributedString: note.attributedContent)
+        Self.replaceThemeDefaultForegroundColors(in: mutable)
+        Self.normalizeParagraphStyles(in: mutable, preserveVerticalSpacing: true)
+        Self.normalizeWhitespace(in: mutable)
+        guard !mutable.isEqual(to: storage) else { return }
+
+        let textViews = storage.layoutManagers.compactMap { $0.firstTextView }
+        let selections = textViews.map { $0.selectedRange() }
+
+        storage.beginEditing()
+        storage.setAttributedString(mutable)
+        storage.endEditing()
+
+        for (textView, selection) in zip(textViews, selections) {
+            let location = min(selection.location, storage.length)
+            let length = min(selection.length, storage.length - location)
+            textView.setSelectedRange(NSRange(location: location, length: length))
+        }
+    }
 
     func sharedTextStorage(for id: UUID) -> NSTextStorage {
         if let existing = sharedStorages[id] {
@@ -123,12 +319,22 @@ class NoteStore: ObservableObject {
     /// textColor — so a removal leaves text invisible in dark mode.
     /// Replacing with the dynamic ink means the attribute is always present
     /// and re-resolves automatically whenever the view's appearance changes.
+    ///
+    /// Runs with NO foreground attribute get the dynamic ink too. Every run
+    /// in a live storage must carry an explicit .foregroundColor: the editor
+    /// deliberately never sets textView.textColor (that NSText setter
+    /// recolors the whole storage and was flattening user/MCP colors — see
+    /// RichTextEditor.buildEditor), so an attribute-less run would render
+    /// AppKit-fallback black in both themes.
     static func replaceThemeDefaultForegroundColors(in storage: NSMutableAttributedString) {
         guard storage.length > 0 else { return }
         let full = NSRange(location: 0, length: storage.length)
         var rangesToReplace: [NSRange] = []
         storage.enumerateAttribute(.foregroundColor, in: full, options: []) { value, range, _ in
-            guard let color = value as? NSColor else { return }
+            guard let color = value as? NSColor else {
+                rangesToReplace.append(range)  // no color at all -> needs ink
+                return
+            }
             if isThemeDefault(color) { rangesToReplace.append(range) }
         }
         for range in rangesToReplace {
@@ -288,6 +494,7 @@ class NoteStore: ObservableObject {
     init(saveURL: URL? = nil) {
         self.saveURLOverride = saveURL
         load()
+        startWatchingStoreDirectory()
         // When the theme flips, any text the user has already typed in the
         // current session has an explicit .foregroundColor baked into its
         // shared NSTextStorage from typingAttributes. Without stripping, it
@@ -886,6 +1093,7 @@ class NoteStore: ObservableObject {
             newNote(userInitiated: false)
             return
         }
+        lastAccountedDiskHash = Self.contentHash(of: data)
         guard let decoded = try? JSONDecoder().decode([Note].self, from: data) else {
             // The file exists but can't be decoded. Move it aside before
             // newNote() → save() writes a fresh store, so one corrupt byte
@@ -895,6 +1103,7 @@ class NoteStore: ObservableObject {
             return
         }
         notes = decoded
+        recordSyncedSnapshot()
         // Don't auto-open a trashed note. If everything is trashed (or the
         // file is empty), fall through to creating a fresh note.
         if let firstActive = notes.first(where: { !$0.isTrashed }) {
@@ -917,7 +1126,14 @@ class NoteStore: ObservableObject {
     }
 
     func save() {
+        // Fold in any external write (MCP server) that landed since we last
+        // read the file — the directory watcher is debounced, so a save can
+        // race ahead of it. Skipping this would overwrite the external
+        // change with our stale in-memory copy.
+        reloadFromDiskIfExternallyChanged()
         guard let data = try? JSONEncoder().encode(notes) else { return }
-        try? data.write(to: saveURL, options: .atomic)
+        guard (try? data.write(to: saveURL, options: .atomic)) != nil else { return }
+        lastAccountedDiskHash = Self.contentHash(of: data)
+        recordSyncedSnapshot()
     }
 }
