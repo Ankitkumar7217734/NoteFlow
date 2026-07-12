@@ -14,6 +14,8 @@ struct APIManagerView: View {
     /// Provider id showing the paste field for a new key.
     @State private var addingKeyToProviderId: UUID?
     @State private var searchText = ""
+    /// Insertion slot (0...count) under the pointer while dragging a provider.
+    @State private var providerInsertionSlot: Int?
     @FocusState private var searchFocused: Bool
 
     private var note: Note {
@@ -24,6 +26,11 @@ struct APIManagerView: View {
     private var trimmedSearch: String {
         searchText.trimmingCharacters(in: .whitespacesAndNewlines)
     }
+
+    /// Reorder only when the full list is showing — a filtered subset doesn't
+    /// map cleanly back onto `providers` indices.
+    private var canReorderProviders: Bool { trimmedSearch.isEmpty && providers.count > 1 }
+    private var isDraggingProvider: Bool { providerInsertionSlot != nil }
 
     /// Provider names, base URLs, and key labels — never secret values.
     private var filteredProviders: [APIProvider] {
@@ -40,22 +47,35 @@ struct APIManagerView: View {
         VStack(spacing: 0) {
             searchBar
             ScrollView {
-                VStack(spacing: 12) {
+                VStack(spacing: 0) {
                     if !trimmedSearch.isEmpty && filteredProviders.isEmpty {
                         Text("No providers match “\(trimmedSearch)”.")
                             .font(.system(size: 13))
                             .foregroundColor(theme.palette.secondaryText)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(.top, 4)
+                            .padding(.bottom, 12)
                     }
 
-                    ForEach(filteredProviders) { provider in
+                    if canReorderProviders {
+                        APIReorderSlot(
+                            isActive: providerInsertionSlot == 0,
+                            isDragging: isDraggingProvider,
+                            onDrop: { dropProvider($0, toInsertionSlot: 0) },
+                            onTargeted: { setProviderSlot(0, hovering: $0) }
+                        )
+                    }
+
+                    ForEach(Array(filteredProviders.enumerated()), id: \.element.id) { index, provider in
                         ProviderCard(
                             noteId: noteId,
                             provider: provider,
+                            index: index,
+                            providerCount: filteredProviders.count,
                             compact: compact,
                             autoFocusName: focusNameForProviderId == provider.id,
                             isAddingKey: addingKeyToProviderId == provider.id,
+                            canReorder: canReorderProviders,
                             onNameFocused: { focusNameForProviderId = nil },
                             onBeginAddKey: {
                                 addingKeyToProviderId = provider.id
@@ -64,10 +84,21 @@ struct APIManagerView: View {
                             onEndAddKey: { addingKeyToProviderId = nil }
                         )
                         .id(provider.id)
+                        .padding(.bottom, canReorderProviders ? 0 : 12)
+
+                        if canReorderProviders {
+                            APIReorderSlot(
+                                isActive: providerInsertionSlot == index + 1,
+                                isDragging: isDraggingProvider,
+                                onDrop: { dropProvider($0, toInsertionSlot: index + 1) },
+                                onTargeted: { setProviderSlot(index + 1, hovering: $0) }
+                            )
+                        }
                     }
 
                     if trimmedSearch.isEmpty {
                         AddProviderCard(compact: compact, onAdd: createProvider)
+                            .padding(.top, canReorderProviders ? 4 : 0)
                     }
                 }
                 .padding(.horizontal, compact ? 14 : 24)
@@ -75,6 +106,20 @@ struct APIManagerView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+    }
+
+    private func setProviderSlot(_ slot: Int, hovering: Bool) {
+        if hovering {
+            providerInsertionSlot = slot
+        } else if providerInsertionSlot == slot {
+            providerInsertionSlot = nil
+        }
+    }
+
+    private func dropProvider(_ id: UUID, toInsertionSlot slot: Int) -> Bool {
+        store.moveProvider(id, toInsertionSlot: slot, in: noteId)
+        providerInsertionSlot = nil
+        return true
     }
 
     private var searchBar: some View {
@@ -113,6 +158,110 @@ struct APIManagerView: View {
             focusNameForProviderId = id
         }
     }
+
+    /// Drag payload for a provider card.
+    static func providerDragPayload(_ id: UUID) -> String { "provider:\(id.uuidString)" }
+    static func providerId(fromDragPayload raw: String) -> UUID? {
+        guard raw.hasPrefix("provider:") else { return nil }
+        return UUID(uuidString: String(raw.dropFirst("provider:".count)))
+    }
+}
+
+// MARK: – Insertion slot (between cards / key rows)
+
+/// Drop target that represents "insert here" — slot 0 is the top. Shown as a
+/// line while dragging so last→top is a single drop on the top slot.
+private struct APIReorderSlot: View {
+    @EnvironmentObject var theme: ThemeStore
+    let isActive: Bool
+    let isDragging: Bool
+    let onDrop: (UUID) -> Bool
+    let onTargeted: (Bool) -> Void
+    var parseId: (String) -> UUID? = APIManagerView.providerId(fromDragPayload:)
+
+    var body: some View {
+        ZStack {
+            Color.clear
+            if isActive {
+                Capsule()
+                    .fill(theme.palette.iconColor)
+                    .frame(height: 3)
+                    .padding(.horizontal, 10)
+                    .shadow(color: theme.palette.iconColor.opacity(0.35), radius: 2, y: 0)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .frame(height: isDragging || isActive ? 28 : 12)
+        .contentShape(Rectangle())
+        .dropDestination(for: String.self) { items, _ in
+            guard let raw = items.first, let id = parseId(raw) else { return false }
+            return onDrop(id)
+        } isTargeted: { onTargeted($0) }
+        .animation(.easeOut(duration: 0.12), value: isActive)
+        .animation(.easeOut(duration: 0.12), value: isDragging)
+    }
+}
+
+// MARK: – Grip + move controls
+
+private struct APIReorderControls: View {
+    @EnvironmentObject var theme: ThemeStore
+    let dragPayload: String
+    let canMoveUp: Bool
+    let canMoveDown: Bool
+    let onMoveToTop: () -> Void
+    let onMoveUp: () -> Void
+    let onMoveDown: () -> Void
+    let onMoveToBottom: () -> Void
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Image(systemName: "line.3.horizontal")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundColor(theme.palette.iconColorDim)
+                .frame(width: 16, height: 22)
+                .contentShape(Rectangle())
+                .draggable(dragPayload)
+                .help("Drag to a drop line to reorder")
+                .contextMenu { moveMenuItems }
+
+            VStack(spacing: 0) {
+                Button(action: onMoveUp) {
+                    Image(systemName: "chevron.up")
+                        .font(.system(size: 10, weight: .bold))
+                        .frame(width: 16, height: 14)
+                }
+                .buttonStyle(.plain)
+                .disabled(!canMoveUp)
+                .opacity(canMoveUp ? 1 : 0.28)
+                .help("Move up")
+
+                Button(action: onMoveDown) {
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 10, weight: .bold))
+                        .frame(width: 16, height: 14)
+                }
+                .buttonStyle(.plain)
+                .disabled(!canMoveDown)
+                .opacity(canMoveDown ? 1 : 0.28)
+                .help("Move down")
+            }
+            .foregroundColor(theme.palette.iconColorDim)
+            .contextMenu { moveMenuItems }
+        }
+    }
+
+    @ViewBuilder
+    private var moveMenuItems: some View {
+        Button("Move to Top", action: onMoveToTop)
+            .disabled(!canMoveUp)
+        Button("Move Up", action: onMoveUp)
+            .disabled(!canMoveUp)
+        Button("Move Down", action: onMoveDown)
+            .disabled(!canMoveDown)
+        Button("Move to Bottom", action: onMoveToBottom)
+            .disabled(!canMoveDown)
+    }
 }
 
 // MARK: – Provider card
@@ -123,9 +272,12 @@ private struct ProviderCard: View {
     @ObservedObject private var menuBarPins = MenuBarPinStore.shared
     let noteId: UUID
     let provider: APIProvider
+    var index: Int = 0
+    var providerCount: Int = 1
     var compact: Bool
     let autoFocusName: Bool
     let isAddingKey: Bool
+    var canReorder: Bool = false
     let onNameFocused: () -> Void
     let onBeginAddKey: () -> Void
     let onEndAddKey: () -> Void
@@ -185,6 +337,20 @@ private struct ProviderCard: View {
     // Provider name — top of the card.
     private var header: some View {
         HStack(spacing: 8) {
+            if canReorder && !showNameEditor {
+                APIReorderControls(
+                    dragPayload: APIManagerView.providerDragPayload(provider.id),
+                    canMoveUp: index > 0,
+                    canMoveDown: index < providerCount - 1,
+                    onMoveToTop: { store.moveProvider(provider.id, toIndex: 0, in: noteId) },
+                    onMoveUp: { store.moveProvider(provider.id, toIndex: index - 1, in: noteId) },
+                    onMoveDown: { store.moveProvider(provider.id, toIndex: index + 1, in: noteId) },
+                    onMoveToBottom: {
+                        store.moveProvider(provider.id, toIndex: providerCount - 1, in: noteId)
+                    }
+                )
+            }
+
             if showNameEditor {
                 nameEditor
             } else {

@@ -63,7 +63,12 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
         let apiItem = NSMenuItem(title: "API", action: nil, keyEquivalent: "")
         let apiMenu = NSMenu()
-        populateAPIMenu(apiMenu, keyEntries: keyEntries, urlEntries: urlEntries)
+        populateAPIMenu(
+            apiMenu,
+            keyEntries: keyEntries,
+            urlEntries: urlEntries,
+            pageOrder: NoteStore.shared.apiManagerPages().map(\.id)
+        )
         apiItem.submenu = apiMenu
         menu.addItem(apiItem)
 
@@ -86,34 +91,30 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         menu.addItem(quit)
     }
 
-    private func populateAPIMenu(
-        _ apiMenu: NSMenu,
+    /// Page → provider → copy rows for the API submenu. Internal so tests can
+    /// pin grouping without touching NoteStore.shared.
+    static func apiMenuRows(
         keyEntries: [MenuBarAPIEntry],
-        urlEntries: [MenuBarProviderEntry]
-    ) {
-        if keyEntries.isEmpty && urlEntries.isEmpty {
-            let empty = NSMenuItem(title: "No API keys saved", action: nil, keyEquivalent: "")
-            empty.isEnabled = false
-            apiMenu.addItem(empty)
-            return
-        }
-
+        urlEntries: [MenuBarProviderEntry],
+        pageOrder: [UUID]
+    ) -> [APIMenuRow] {
+        var rows: [APIMenuRow] = []
         let keysByPage = Dictionary(grouping: keyEntries, by: \.pageId)
         let urlsByPage = Dictionary(grouping: urlEntries, by: \.pageId)
-        let pageOrder = NoteStore.shared.apiManagerPages().map(\.id)
 
         for pageId in pageOrder {
             let pageKeys = keysByPage[pageId] ?? []
             let pageURLs = urlsByPage[pageId] ?? []
             guard !pageKeys.isEmpty || !pageURLs.isEmpty else { continue }
 
+            if !rows.isEmpty {
+                rows.append(.pageSeparator)
+            }
+
             let pageTitle = pageKeys.first?.pageTitle
                 ?? pageURLs.first?.pageTitle
                 ?? "API Keys"
-
-            let pageHeader = NSMenuItem(title: pageTitle, action: nil, keyEquivalent: "")
-            pageHeader.isEnabled = false
-            apiMenu.addItem(pageHeader)
+            rows.append(.pageHeader(pageTitle))
 
             var providerIds: [UUID] = []
             for entry in pageKeys where !providerIds.contains(entry.providerId) {
@@ -131,30 +132,47 @@ final class MenuBarController: NSObject, NSMenuDelegate {
                 let providerName = keys.first?.providerName
                     ?? urlsByProvider[providerId]?.providerName
                     ?? "Provider"
-
-                let providerHeader = NSMenuItem(
-                    title: "  \(providerName)",
-                    action: nil,
-                    keyEquivalent: ""
-                )
-                providerHeader.isEnabled = false
-                apiMenu.addItem(providerHeader)
+                rows.append(.providerHeader(providerName))
 
                 if let urlEntry = urlsByProvider[providerId] {
-                    apiMenu.addItem(copyURLItem(for: urlEntry, indent: true))
+                    rows.append(.copyURL(urlEntry))
                 }
-
                 for entry in keys {
-                    apiMenu.addItem(copyKeyItem(for: entry, indent: true))
+                    rows.append(.copyKey(entry))
                 }
             }
+        }
+        return rows
+    }
 
-            apiMenu.addItem(.separator())
+    /// Installs the API submenu: empty placeholder, or a fixed-height scrollable
+    /// list. NSMenu has no height cap of its own — a long native item list
+    /// stretches toward full screen — so the rows live in `MenuBarAPIListView`.
+    /// Internal so MenuBarTests can drive the layout without NoteStore.shared.
+    func populateAPIMenu(
+        _ apiMenu: NSMenu,
+        keyEntries: [MenuBarAPIEntry],
+        urlEntries: [MenuBarProviderEntry],
+        pageOrder: [UUID]
+    ) {
+        if keyEntries.isEmpty && urlEntries.isEmpty {
+            let empty = NSMenuItem(title: "No API keys saved", action: nil, keyEquivalent: "")
+            empty.isEnabled = false
+            apiMenu.addItem(empty)
+            return
         }
 
-        if apiMenu.items.last?.isSeparatorItem == true {
-            apiMenu.removeItem(at: apiMenu.items.count - 1)
+        let rows = Self.apiMenuRows(
+            keyEntries: keyEntries,
+            urlEntries: urlEntries,
+            pageOrder: pageOrder
+        )
+        let list = MenuBarAPIListView(rows: rows) { value in
+            NoteStore.shared.copyToPasteboard(value)
         }
+        let item = NSMenuItem()
+        item.view = list
+        apiMenu.addItem(item)
     }
 
     private func copyKeyItem(for entry: MenuBarAPIEntry, indent: Bool) -> NSMenuItem {

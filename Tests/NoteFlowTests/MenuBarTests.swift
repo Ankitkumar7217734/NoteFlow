@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import AppKit
 @testable import NoteFlow
 
 private func isolatedPinDefaults() -> (UserDefaults, String) {
@@ -86,4 +87,82 @@ private func isolatedPinDefaults() -> (UserDefaults, String) {
     #expect(entry.menuTitle.contains("Gemini"))
     #expect(entry.menuTitle.hasSuffix("1234"))
     #expect(entry.menuTitle.contains("•"))
+}
+
+// MARK: – API submenu is a small scrollable list (not a tall native menu)
+
+private func makeKeyEntries(
+    count: Int, provider: UUID, providerName: String, page: UUID
+) -> [MenuBarAPIEntry] {
+    (0..<count).map { i in
+        MenuBarAPIEntry(
+            keyId: UUID(), providerId: provider, pageId: page,
+            pageTitle: "API Keys", providerName: providerName,
+            keyValue: "sk-\(providerName.lowercased())-\(i)", createdAt: Date()
+        )
+    }
+}
+
+@Test @MainActor func apiMenuRowsGroupPageThenProviderThenCopyActions() {
+    let page = UUID()
+    let gemini = UUID()
+    let openAI = UUID()
+    let keys = makeKeyEntries(count: 2, provider: gemini, providerName: "Gemini", page: page)
+        + makeKeyEntries(count: 1, provider: openAI, providerName: "OpenAI", page: page)
+    let urls = [MenuBarProviderEntry(
+        providerId: gemini, pageId: page, pageTitle: "API Keys",
+        providerName: "Gemini", baseURL: "https://gemini.example/v1"
+    )]
+
+    let rows = MenuBarController.apiMenuRows(
+        keyEntries: keys, urlEntries: urls, pageOrder: [page]
+    )
+
+    #expect(rows == [
+        .pageHeader("API Keys"),
+        .providerHeader("Gemini"),
+        .copyURL(urls[0]),
+        .copyKey(keys[0]),
+        .copyKey(keys[1]),
+        .providerHeader("OpenAI"),
+        .copyKey(keys[2]),
+    ])
+}
+
+@Test @MainActor func apiMenuInstallsFixedHeightScrollableList() {
+    let page = UUID()
+    let provider = UUID()
+    // More content rows than maxVisibleRows so the list must scroll.
+    let keys = makeKeyEntries(
+        count: MenuBarAPIListView.maxVisibleRows + 8,
+        provider: provider, providerName: "Gemini", page: page
+    )
+
+    let menu = NSMenu()
+    MenuBarController.shared.populateAPIMenu(
+        menu, keyEntries: keys, urlEntries: [], pageOrder: [page]
+    )
+
+    #expect(menu.items.count == 1)
+    let list = menu.items[0].view as? MenuBarAPIListView
+    #expect(list != nil)
+    let cappedHeight = CGFloat(MenuBarAPIListView.maxVisibleRows) * MenuBarAPIListView.rowHeight
+    #expect(list?.frame.height == cappedHeight)
+    #expect(list?.scrollView.documentView?.frame.height ?? 0 > cappedHeight)
+
+    // Every key is still present as a copy row inside the scrolled content.
+    let copyValues = list?.rowViews.compactMap(\.copyValue) ?? []
+    #expect(copyValues.filter { $0.hasPrefix("sk-") }.count == keys.count)
+}
+
+@Test @MainActor func apiListRowCopyCallsHandler() {
+    var copied: String?
+    let entry = MenuBarAPIEntry(
+        keyId: UUID(), providerId: UUID(), pageId: UUID(),
+        pageTitle: "API Keys", providerName: "Gemini",
+        keyValue: "sk-copy-me-9999", createdAt: Date()
+    )
+    let row = MenuBarAPIListRowView(row: .copyKey(entry)) { copied = $0 }
+    row.triggerCopy()
+    #expect(copied == "sk-copy-me-9999")
 }

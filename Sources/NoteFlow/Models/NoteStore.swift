@@ -630,6 +630,46 @@ class NoteStore: ObservableObject {
         }
     }
 
+    /// Reorder a provider so it lands at `toIndex` in the final array (0 = top).
+    /// Array order is what the API page and menu bar both display.
+    func moveProvider(_ providerId: UUID, toIndex: Int, in noteId: UUID) {
+        mutateProviders(noteId) { providers in
+            guard let from = providers.firstIndex(where: { $0.id == providerId }),
+                  let dest = Self.finalIndexAfterMove(from: from, toIndex: toIndex, count: providers.count)
+            else { return }
+            let item = providers.remove(at: from)
+            providers.insert(item, at: dest)
+        }
+    }
+
+    /// Drop between cards: `slot` is 0...count (0 = before first / top, count = after last).
+    func moveProvider(_ providerId: UUID, toInsertionSlot slot: Int, in noteId: UUID) {
+        mutateProviders(noteId) { providers in
+            guard let from = providers.firstIndex(where: { $0.id == providerId }),
+                  let dest = Self.finalIndex(from: from, insertionSlot: slot, count: providers.count)
+            else { return }
+            let item = providers.remove(at: from)
+            providers.insert(item, at: dest)
+        }
+    }
+
+    /// Insertion slot (0...count) → final index after removing `from`. Nil = no-op.
+    static func finalIndex(from: Int, insertionSlot: Int, count: Int) -> Int? {
+        guard count > 1, from >= 0, from < count else { return nil }
+        var dest = max(0, min(insertionSlot, count))
+        if from < dest { dest -= 1 }
+        guard dest != from else { return nil }
+        return dest
+    }
+
+    /// Desired final index (0...count-1) → insert index after removing `from`. Nil = no-op.
+    static func finalIndexAfterMove(from: Int, toIndex: Int, count: Int) -> Int? {
+        guard count > 1, from >= 0, from < count else { return nil }
+        let target = max(0, min(toIndex, count - 1))
+        guard target != from else { return nil }
+        return target
+    }
+
     /// Copy arbitrary text (an API key) to the system clipboard. Same pattern
     /// as the editor's Copy button.
     func copyToPasteboard(_ text: String) {

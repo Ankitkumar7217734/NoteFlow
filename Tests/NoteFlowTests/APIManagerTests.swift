@@ -216,6 +216,60 @@ private func makeTempDir() throws -> URL {
     #expect(after.providers == nil)       // guard prevented any mutation
 }
 
+// MARK: – Reorder providers / keys (array order is display order)
+
+@Test @MainActor func moveProviderRoundTripThroughSaveLoad() throws {
+    let dir = try makeTempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+    let url = dir.appendingPathComponent("notes.json")
+
+    let store = NoteStore(saveURL: url)
+    store.newAPIPage()
+    let id = try #require(store.activeTabId)
+
+    store.addProvider(named: "First", to: id)
+    store.addProvider(named: "Second", to: id)
+    store.addProvider(named: "Third", to: id)
+    var providers = try #require(store.notes.first(where: { $0.id == id })?.providers)
+    #expect(providers.map(\.name) == ["First", "Second", "Third"])
+
+    let thirdId = try #require(providers.first(where: { $0.name == "Third" })?.id)
+    store.moveProvider(thirdId, toIndex: 0, in: id)
+    providers = try #require(store.notes.first(where: { $0.id == id })?.providers)
+    #expect(providers.map(\.name) == ["Third", "First", "Second"])
+
+    let reloaded = NoteStore(saveURL: url)
+    #expect(reloaded.notes.first(where: { $0.id == id })?.providers?.map(\.name)
+        == ["Third", "First", "Second"])
+}
+
+@Test @MainActor func insertionSlotMovesLastProviderToTopInOneStep() throws {
+    let dir = try makeTempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+    let store = NoteStore(saveURL: dir.appendingPathComponent("notes.json"))
+    store.newAPIPage()
+    let id = try #require(store.activeTabId)
+    store.addProvider(named: "A", to: id)
+    store.addProvider(named: "B", to: id)
+    store.addProvider(named: "C", to: id)
+
+    // Slot math: last item (from 2) into top slot (0) → final index 0.
+    #expect(NoteStore.finalIndex(from: 2, insertionSlot: 0, count: 3) == 0)
+    #expect(NoteStore.finalIndex(from: 0, insertionSlot: 3, count: 3) == 2)
+    #expect(NoteStore.finalIndex(from: 1, insertionSlot: 1, count: 3) == nil) // no-op
+
+    let providers = try #require(store.notes.first(where: { $0.id == id })?.providers)
+    let lastId = try #require(providers.last?.id)
+    store.moveProvider(lastId, toInsertionSlot: 0, in: id)
+    #expect(store.notes.first(where: { $0.id == id })?.providers?.map(\.name) == ["C", "A", "B"])
+}
+
+@Test @MainActor func moveProviderIsNoOpOnRichTextNote() throws {
+    let dir = try makeTempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+    let store = NoteStore(saveURL: dir.appendingPathComponent("notes.json"))
+    let rich = try #require(store.notes.first)
+    store.moveProvider(UUID(), toIndex: 0, in: rich.id)
+    #expect(store.notes.first(where: { $0.id == rich.id })?.providers == nil)
+}
+
 // MARK: – Export is refused for API pages
 
 @Test @MainActor func exportIsRefusedForAPIPage() throws {
